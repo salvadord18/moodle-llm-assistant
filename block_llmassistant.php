@@ -32,114 +32,158 @@ public function get_content() {
 
     $this->content = new stdClass();
 
-    // API endpoint (FastAPI RAG)
     $apiurl = new moodle_url('/blocks/llmassistant/rag_endpoint.php');
 
-    // HTML structure of the chat interface
     $this->content->text = '
         <style>
-            /* Chat container */
-            #llm_chat_window {
-                height: 350px;
-                overflow-y: auto;
-                padding: 12px;
+            /* ---------- SIDEBAR CHAT UI ---------- */
+
+            .llm-chat-container {
+                position: relative;
+                background: #f8f9fa;
+                border: 1px solid #ccc;
                 border-radius: 10px;
-                background: #f5f5f5;
-                border: 1px solid #ddd;
-                margin-bottom: 10px;
-                font-size: 14px;
+                display: flex;
+                flex-direction: column;
+                height: 450px;
+                max-height: 80vh;
+                transition: all 0.3s ease;
             }
 
-            /* Message bubbles */
-            .msg-user {
-                background: #dcf8c6;
+            /* Fullscreen mode */
+            .llm-chat-fullscreen {
+                position: fixed !important;
+                top: 0; left: 0;
+                width: 100vw !important;
+                height: 100vh !important;
+                z-index: 9999 !important;
+                border-radius: 0 !important;
+            }
+
+            .llm-chat-header {
+                background: #0b5ed7;
+                color: white;
                 padding: 10px;
-                border-radius: 10px;
+                border-radius: 10px 10px 0 0;
+                display: flex;
+                justify-content: space-between;
+                align-items: center;
+            }
+
+            .llm-chat-header button {
+                background: transparent;
+                border: none;
+                color: white;
+                cursor: pointer;
+                font-size: 18px;
+            }
+
+            #llm_chat_window {
+                flex: 1;
+                overflow-y: auto;
+                padding: 12px;
+            }
+
+            .msg-user {
+                background: #d4edda;
+                padding: 10px;
                 margin-bottom: 8px;
-                width: fit-content;
+                border-radius: 8px;
                 max-width: 80%;
                 margin-left: auto;
             }
 
             .msg-bot {
-                background: #ededed;
+                background: #e2e3e5;
                 padding: 10px;
-                border-radius: 10px;
                 margin-bottom: 8px;
-                width: fit-content;
+                border-radius: 8px;
                 max-width: 80%;
             }
 
+            .llm-chat-input {
+                display: flex;
+                padding: 10px;
+                gap: 5px;
+            }
+
             #llm_input {
-                width: 100%;
+                flex: 1;
                 padding: 8px;
                 border-radius: 6px;
                 border: 1px solid #ccc;
-                margin-bottom: 6px;
+                resize: none;
             }
 
             #llm_send {
-                width: 100%;
-                padding: 8px;
+                padding: 8px 12px;
                 background: #0b5ed7;
-                color: white;
                 border: none;
                 border-radius: 6px;
+                color: white;
                 cursor: pointer;
-            }
-
-            #llm_send:hover {
-                background: #0a53be;
             }
         </style>
 
-        <div id="llm_chat_window"></div>
+        <div id="llm_chat" class="llm-chat-container">
+            <div class="llm-chat-header">
+                <span>LLM Assistant</span>
+                <button id="llm_expand">⤢</button>
+            </div>
 
-        <textarea id="llm_input" rows="2" placeholder="Write your question..."></textarea>
-        <button id="llm_send">Submit</button>
+            <div id="llm_chat_window"></div>
+
+            <div class="llm-chat-input">
+                <textarea id="llm_input" rows="2" placeholder="Write your question..."></textarea>
+                <button id="llm_send">Submit</button>
+            </div>
+        </div>
 
         <script>
         (function() {
+            const chat = document.getElementById("llm_chat");
+            const chatWindow = document.getElementById("llm_chat_window");
             const sendBtn = document.getElementById("llm_send");
             const input = document.getElementById("llm_input");
-            const chat = document.getElementById("llm_chat_window");
+            const expandBtn = document.getElementById("llm_expand");
 
             function addMessage(text, type) {
                 const div = document.createElement("div");
-                div.className = (type === "user" ? "msg-user" : "msg-bot");
+                div.className = type === "user" ? "msg-user" : "msg-bot";
                 div.textContent = text;
-                chat.appendChild(div);
-                chat.scrollTop = chat.scrollHeight;
+                chatWindow.appendChild(div);
+                chatWindow.scrollTop = chatWindow.scrollHeight;
             }
 
-            async function sendMessage() {
-                const question = input.value.trim();
-                if (!question) return;
+            expandBtn.addEventListener("click", () => {
+                chat.classList.toggle("llm-chat-fullscreen");
+                expandBtn.textContent = chat.classList.contains("llm-chat-fullscreen") ? "⤡" : "⤢";
+            });
 
-                addMessage(question, "user");
+            async function sendMessage() {
+                const q = input.value.trim();
+                if (!q) return;
+                addMessage(q, "user");
                 input.value = "";
                 addMessage("Thinking...", "bot");
 
                 const res = await fetch("'.$apiurl.'", {
                     method: "POST",
-                    headers: { "Content-Type": "application/x-www-form-urlencoded" },
+                    headers: {"Content-Type": "application/x-www-form-urlencoded"},
                     body: new URLSearchParams({
                         sesskey: M.cfg.sesskey,
-                        question: question,
+                        question: q,
                         courseid: '.$COURSE->id.'
                     })
                 });
-                
+
                 const data = await res.json();
-
-                // Remove temporary "Thinking..."
-                chat.lastChild.remove();
-
-                addMessage(data.answer || "Error answering.", "bot");
+                chatWindow.lastChild.remove();
+                addMessage(data.answer, "bot");
             }
 
             sendBtn.addEventListener("click", sendMessage);
-            input.addEventListener("keypress", function(e) {
+            input.addEventListener("keypress", e => {
                 if (e.key === "Enter") {
                     e.preventDefault();
                     sendMessage();

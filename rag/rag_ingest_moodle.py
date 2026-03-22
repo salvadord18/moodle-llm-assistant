@@ -1,30 +1,27 @@
 """
-Improved Moodle RAG PDF Ingestion Script
------------------------------------------
+RAG Ingestion for Moodle - Optimized Chunking + Metadata
+-----------------------------------------------------------
 
-This script:
-1. Connects to Moodle PostgreSQL (inside moodle-docker)
-2. Retrieves only the PDF files belonging to one course
-3. Loads the PDF from moodledata/filedir
-4. Cleans text and chunks it with overlap
-5. Generates embeddings through Ollama
-6. Stores documents + embeddings + metadata in ChromaDB
+Improvements:
+- Larger chunks (3000 chars)
+- Overlap (400 chars)
+- Normalize text (remove weird spacing)
+- Store metadata 'source' per chunk
+- Designed for FastAPI RAG v3
 
-Run this script INSIDE the 'webserver' container.
+Run inside the Moodle 'webserver' container.
 """
 
 import os
-import fitz  # PyMuPDF
+import fitz
 import psycopg2
 import requests
 from chromadb import PersistentClient
+import re
 
-# ----------------------------------------------------
-# CONFIG
-# ----------------------------------------------------
 MOODLEDATA_PATH = "/var/www/moodledata/filedir"
 CHROMA_DB_PATH = "/rag_vectordb"
-TARGET_COURSE_ID = 2  # <--- important
+TARGET_COURSE_ID = 2
 
 DB = {
     "host": "db",
@@ -47,22 +44,28 @@ except:
         metadata={"hnsw:space": "cosine"}
     )
 
-# ----------------------------------------------------
-# EMBEDDING FUNCTION
-# ----------------------------------------------------
+def normalize(text):
+    """Normalize whitespace and remove stray characters."""
+    text = re.sub(r"\s+", " ", text)
+    return text.strip()
+
 def embed(text: str):
-    """Generate embedding using Ollama."""
-    r = requests.post(
+    response = requests.post(
         "http://host.docker.internal:11434/api/embed",
         json={"model": "nomic-embed-text", "input": text}
     )
-    return r.json()["embeddings"][0]
+    return response.json()["embeddings"][0]
 
-# ----------------------------------------------------
-# DATABASE QUERY
-# ----------------------------------------------------
+def chunk_text(text, size=3000, overlap=400):
+    chunks = []
+    start = 0
+    while start < len(text):
+        end = start + size
+        chunks.append(text[start:end])
+        start = end - overlap
+    return chunks
+
 def get_course_pdfs():
-    """Return list of (contenthash, filename, contextid) for TARGET_COURSE_ID."""
     conn = psycopg2.connect(**DB)
     cur = conn.cursor()
 
@@ -80,48 +83,26 @@ def get_course_pdfs():
     conn.close()
     return rows
 
-# ----------------------------------------------------
-# CHUNKING
-# ----------------------------------------------------
-def chunk_text(text, size=1500, overlap=200):
-    """Split text into overlapping chunks."""
-    chunks = []
-    start = 0
-
-    while start < len(text):
-        end = start + size
-        chunks.append(text[start:end])
-        start = end - overlap
-
-    return chunks
-
-# ----------------------------------------------------
-# PROCESS PDF
-# ----------------------------------------------------
 def ingest_pdf(contenthash, filename):
-    """Read PDF, chunk, embed, store in Chroma."""
     sub1 = contenthash[:2]
     sub2 = contenthash[2:4]
-
     pdf_path = f"{MOODLEDATA_PATH}/{sub1}/{sub2}/{contenthash}"
 
     if not os.path.exists(pdf_path):
         print(f"[SKIP] Missing: {pdf_path}")
         return
 
-    print(f"[INFO] Processing {filename}")
-
+    print(f"[INFO] Processing: {filename}")
     doc = fitz.open(pdf_path)
-    fulltext = ""
 
+    text = ""
     for page in doc:
-        txt = page.get_text()
-        if txt:
-            fulltext += txt + "\n"
+        text += page.get_text() + "\n"
 
-    chunks = chunk_text(fulltext)
-    embeddings = [embed(chunk) for chunk in chunks]
+    text = normalize(text)
+    chunks = chunk_text(text)
 
+    embeddings = [embed(c) for c in chunks]
     metadatas = [{"source": filename} for _ in chunks]
     ids = [f"{contenthash}_{i}" for i in range(len(chunks))]
 
@@ -132,14 +113,9 @@ def ingest_pdf(contenthash, filename):
         embeddings=embeddings
     )
 
-# ----------------------------------------------------
-# MAIN
-# ----------------------------------------------------
 if __name__ == "__main__":
     pdfs = get_course_pdfs()
-    print(f"[INFO] Found {len(pdfs)} PDFs in course {TARGET_COURSE_ID}")
-
+    print(f"[INFO] Found {len(pdfs)} PDFs.")
     for contenthash, filename in pdfs:
         ingest_pdf(contenthash, filename)
-
-    print("[SUCCESS] Ingestion completed.")
+    print("[SUCCESS] Ingestion v3 completed.")
