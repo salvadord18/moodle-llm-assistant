@@ -123,6 +123,17 @@ public function get_content() {
                 color: white;
                 cursor: pointer;
             }
+
+            .llm-chat-fullscreen #llm_chat_window {
+                font-size: 16px;
+                padding: 18px;
+            }
+
+            .llm-chat-fullscreen .llm-chat-input {
+                position: sticky;
+                bottom: 0;
+                background: #f8f9fa;
+            }
         </style>
 
         <div id="llm_chat" class="llm-chat-container">
@@ -180,6 +191,10 @@ public function get_content() {
                 const data = await res.json();
                 chatWindow.lastChild.remove();
                 addMessage(data.answer, "bot");
+                
+                if (data.sources && data.sources.length) {
+                addMessage("Sources: " + [...new Set(data.sources)].join(", "), "bot");
+                }
             }
 
             sendBtn.addEventListener("click", sendMessage);

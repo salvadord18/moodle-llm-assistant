@@ -1,5 +1,5 @@
 """
-RAG API v4 for Moodle – Teacher-aware retrieval + deterministic extraction
+RAG API for Moodle - Teacher-aware retrieval + deterministic extraction
 -------------------------------------------------------------------------
 
 Key improvements:
@@ -43,6 +43,41 @@ def is_teacher_question(q: str) -> bool:
     return any(k in q for k in keywords)
 
 def extract_lecturers_from_text(text: str):
+    """
+    Extract lecturer names and emails using tight patterns.
+    Avoid returning huge chunks by capturing only the relevant part.
+    """
+
+    # Patterns to capture the most relevant lecturer lines (non-greedy).
+    # We stop at "Email:" or at a typical separator/line break.
+    patterns = [
+        r"(Lecturer\s*\(Theoretical\)\s*:\s*.*?)(?=\s*Email:|$)",
+        r"(Lecturer\s*\(Labs\)\s*:\s*.*?)(?=\s*Email:|$)",
+        r"(Lecturer\s*:\s*.*?)(?=\s*Email:|$)",
+    ]
+
+    lecturer_lines = []
+    for pat in patterns:
+        for m in re.finditer(pat, text, flags=re.IGNORECASE):
+            line = m.group(1).strip()
+            # Hard cap to prevent “wall of text”
+            lecturer_lines.append(line[:180])
+
+    email_lines = []
+    for m in re.finditer(r"Email:\s*([A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,})", text, flags=re.IGNORECASE):
+        email_lines.append("Email: " + m.group(1))
+
+    # De-duplicate while preserving order
+    def uniq(seq):
+        seen = set()
+        out = []
+        for x in seq:
+            if x not in seen:
+                seen.add(x)
+                out.append(x)
+        return out
+
+    return uniq(lecturer_lines), uniq(email_lines)
     """
     Deterministically extract lecturer-related lines.
     This avoids LLM hallucination.
@@ -110,6 +145,11 @@ def ask(data: Query):
     metas = lex_metas + sem_metas
 
     # 4) Build a single context string with sources
+    if is_teacher_question(q):
+        zipped = list(zip(docs, metas))
+        # Put Lecture1.pdf first
+        zipped.sort(key=lambda dm: 0 if (dm[1] and dm[1].get("source") == "Lecture1.pdf") else 1)
+        docs, metas = zip(*zipped) if zipped else (docs, metas)
     context = ""
     for doc, meta in zip(docs, metas):
         src = meta.get("source", "unknown.pdf") if meta else "unknown.pdf"
@@ -120,18 +160,38 @@ def ask(data: Query):
         lecturer_lines, email_lines = extract_lecturers_from_text(context)
         if lecturer_lines or email_lines:
             answer_lines = []
-            answer_lines.append("Teachers / Lecturers found in the PDFs:")
-            answer_lines.extend([f"- {l}" for l in lecturer_lines])
+            answer_lines.append("Teachers:")
+
+            # Split theoretical vs labs when present
+            theoretical = [l for l in lecturer_lines if "theoretical" in l.lower()]
+            labs = [l for l in lecturer_lines if "labs" in l.lower()]
+            generic = [l for l in lecturer_lines if l not in theoretical and l not in labs]
+
+            if theoretical:
+                answer_lines.append("") 
+                answer_lines.append("Theoretical:")
+                answer_lines.extend([f"- {l}" for l in theoretical])
+
+            if labs:
+                answer_lines.append("")
+                answer_lines.append("Labs:")
+                answer_lines.extend([f"- {l}" for l in labs])
+
+            if generic:
+                answer_lines.append("")
+                answer_lines.append("Other lecturer lines:")
+                answer_lines.extend([f"- {l}" for l in generic])
+
             if email_lines:
                 answer_lines.append("")
-                answer_lines.append("Emails found in the PDFs:")
+                answer_lines.append("Emails:")
                 answer_lines.extend([f"- {e}" for e in email_lines])
 
             sources = []
             for m in metas:
-                if m and "source" in m:
+                if m and m.get("source"):
                     sources.append(m["source"])
-            sources = list(dict.fromkeys(sources))  # unique preserving order
+            sources = list(dict.fromkeys(sources))
 
             return {"answer": "\n".join(answer_lines), "sources": sources}
 
