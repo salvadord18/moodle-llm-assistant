@@ -1,0 +1,11 @@
+<XMLDB PATH HERE…>
+    <TABLE NAME="llmassistant_history" COMMENT="Chat history">
+        <FIELD NAME="id" TYPE="int" LENGTH="10" NOTNULL="true" SEQUENCE="true" />
+        <FIELD NAME="userid" TYPE="int" LENGTH="10" NOTNULL="true" />
+        <FIELD NAME="courseid" TYPE="int" LENGTH="10" NOTNULL="true" />
+        <FIELD NAME="message_user" TYPE="text" NOTNULL="false" />
+        <FIELD NAME="message_bot" TYPE="text" NOTNULL="false" />
+        <FIELD NAME="timecreated" TYPE="int" LENGTH="10" NOTNULL="true" />
+        <KEY NAME="primary" TYPE="primary" FIELDS="id" />
+    </TABLE>
+</XMLDB>
