@@ -20,7 +20,7 @@ from chromadb import PersistentClient
 import re
 
 MOODLEDATA_PATH = "/var/www/moodledata/filedir"
-CHROMA_DB_PATH = "/rag_vectordb"
+CHROMA_DB_PATH = "/var/www/moodledata/chroma_db"
 TARGET_COURSE_ID = 2
 
 DB = {
@@ -118,4 +118,4 @@ if __name__ == "__main__":
     print(f"[INFO] Found {len(pdfs)} PDFs.")
     for contenthash, filename in pdfs:
         ingest_pdf(contenthash, filename)
-    print("[SUCCESS] Ingestion v3 completed.")
+    print("[SUCCESS] Ingestion completed.")
