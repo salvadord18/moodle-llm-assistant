@@ -1,11 +1,24 @@
-<XMLDB PATH HERE…>
-    <TABLE NAME="llmassistant_history" COMMENT="Chat history">
-        <FIELD NAME="id" TYPE="int" LENGTH="10" NOTNULL="true" SEQUENCE="true" />
-        <FIELD NAME="userid" TYPE="int" LENGTH="10" NOTNULL="true" />
-        <FIELD NAME="courseid" TYPE="int" LENGTH="10" NOTNULL="true" />
-        <FIELD NAME="message_user" TYPE="text" NOTNULL="false" />
-        <FIELD NAME="message_bot" TYPE="text" NOTNULL="false" />
-        <FIELD NAME="timecreated" TYPE="int" LENGTH="10" NOTNULL="true" />
-        <KEY NAME="primary" TYPE="primary" FIELDS="id" />
+<?xml version="1.0" encoding="UTF-8" ?>
+<XMLDB PATH="blocks/llmassistant/db" VERSION="2026032700" COMMENT="LLM Assistant tables"
+  xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+  xsi:noNamespaceSchemaLocation="../../../lib/xmldb/xmldb.xsd">
+
+  <TABLES>
+    <TABLE NAME="block_llmassistant_msg" COMMENT="Chat messages for LLM Assistant">
+      <FIELDS>
+        <FIELD NAME="id" TYPE="int" LENGTH="10" NOTNULL="true" SEQUENCE="true"/>
+        <FIELD NAME="userid" TYPE="int" LENGTH="10" NOTNULL="true"/>
+        <FIELD NAME="courseid" TYPE="int" LENGTH="10" NOTNULL="true" DEFAULT="0"/>
+        <FIELD NAME="role" TYPE="char" LENGTH="10" NOTNULL="true" COMMENT="user|assistant"/>
+        <FIELD NAME="message" TYPE="text" NOTNULL="true"/>
+        <FIELD NAME="timecreated" TYPE="int" LENGTH="10" NOTNULL="true"/>
+      </FIELDS>
+      <KEYS>
+        <KEY NAME="primary" TYPE="primary" FIELDS="id"/>
+      </KEYS>
+      <INDEXES>
+        <INDEX NAME="idx_user_course_time" UNIQUE="false" FIELDS="userid,courseid,timecreated"/>
+      </INDEXES>
     </TABLE>
+  </TABLES>
 </XMLDB>

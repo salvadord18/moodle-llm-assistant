@@ -1,213 +1,208 @@
 <?php
 defined('MOODLE_INTERNAL') || die();
 
-class block_llmassistant extends block_base
-{
+class block_llmassistant extends block_base {
 
-    public function init()
-    {
+    public function init() {
         $this->title = get_string('pluginname', 'block_llmassistant');
     }
 
-    public function applicable_formats()
-    {
+    public function applicable_formats() {
         return [
             'course-view' => true,
             'site' => true,
-            'my' => true
+            'my' => true,
         ];
     }
 
-    public function instance_allow_multiple()
-    {
+    public function instance_allow_multiple() {
         return false;
     }
 
-public function get_content() {
-    global $OUTPUT, $USER, $COURSE;
+    public function get_content() {
+        global $COURSE, $PAGE;
 
-    if ($this->content !== null) {
+        if ($this->content !== null) {
+            return $this->content;
+        }
+
+        $this->content = new stdClass();
+
+        // --- Unique IDs per block instance (avoid DOM collisions) ---
+        $instanceid = $this->instance ? (int)$this->instance->id : 0;
+        $uid = 'llm_' . $instanceid;
+
+        // --- Proxy endpoint (Moodle -> FastAPI) ---
+        $apiurl = (new moodle_url('/blocks/llmassistant/rag_endpoint.php'))->out(false);
+
+        // --- Decide where "Open" should go (course vs global) ---
+        $iscourse = (!empty($COURSE->id) && $COURSE->id != SITEID && $PAGE->context->contextlevel == CONTEXT_COURSE);
+        if ($iscourse) {
+            $openurl = (new moodle_url('/blocks/llmassistant/chat.php', ['courseid' => $COURSE->id]))->out(false);
+        } else {
+            $openurl = (new moodle_url('/blocks/llmassistant/global.php'))->out(false);
+        }
+
+        // --- English UI strings (as requested) ---
+        $labeltitle = 'LLM Assistant';
+        $labelopen = 'Open';
+        $labelclear = 'Clear';
+        $labelsend = 'Send';
+        $labelplaceholder = 'Write your question...';
+        $labelthinking = 'Thinking...';
+        $labelsources = 'Sources:';
+        $labelwelcome = 'Hi! Ask me something.';
+
+        // --- Pre-encode strings for safe JS injection ---
+        $apiurl_js = json_encode($apiurl, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
+        $openurl_js = json_encode($openurl, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
+        $welcome_js = json_encode($labelwelcome, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
+
+        $courseid = (int)$COURSE->id;
+
+        $this->content->text = <<<HTML
+<style>
+/* ---------- LLM Assistant (Sidebar) UI ---------- */
+.llm-chat-container-{$uid}{background:#f8f9fa;border:1px solid #d0d7de;border-radius:12px;display:flex;flex-direction:column;height:460px;max-height:80vh;overflow:hidden;font-size:14px}
+.llm-chat-header-{$uid}{background:#0b5ed7;color:#fff;padding:10px 12px;display:flex;justify-content:space-between;align-items:center}
+.llm-chat-title-{$uid}{font-weight:600}
+.llm-chat-actions-{$uid}{display:flex;gap:8px;align-items:center}
+.llm-btn-{$uid}{background:rgba(255,255,255,.15);border:1px solid rgba(255,255,255,.25);color:#fff;border-radius:8px;padding:6px 10px;cursor:pointer;font-size:12px}
+.llm-btn-{$uid}:hover{background:rgba(255,255,255,.22)}
+.llm-chat-window-{$uid}{flex:1;overflow-y:auto;padding:12px;background:#fff}
+.llm-msg-user-{$uid}{background:#d4edda;padding:10px;margin-bottom:8px;border-radius:12px;max-width:85%;margin-left:auto;white-space:pre-wrap}
+.llm-msg-bot-{$uid}{background:#e9ecef;padding:10px;margin-bottom:8px;border-radius:12px;max-width:85%;white-space:pre-wrap}
+.llm-sources-{$uid}{margin-top:6px;font-size:12px;opacity:.9}
+.llm-chip-{$uid}{display:inline-block;padding:2px 8px;margin:2px 6px 0 0;border-radius:999px;background:#fff;border:1px solid #d0d7de}
+.llm-chat-inputwrap-{$uid}{display:flex;gap:8px;padding:10px;background:#f8f9fa;border-top:1px solid #d0d7de}
+.llm-input-{$uid}{flex:1;padding:8px;border-radius:10px;border:1px solid #c6cbd1;resize:none;outline:none}
+.llm-send-{$uid}{padding:8px 14px;background:#0b5ed7;border:none;border-radius:10px;color:#fff;cursor:pointer}
+.llm-send-{$uid}:hover{background:#0a53be}
+.llm-spinner-{$uid}{display:inline-block;width:12px;height:12px;border:2px solid #bbb;border-top-color:#333;border-radius:50%;margin-right:8px;animation:llmspin-{$uid} .8s linear infinite}
+@keyframes llmspin-{$uid}{to{transform:rotate(360deg)}}
+</style>
+
+<div id="llm_chat_{$uid}" class="llm-chat-container-{$uid}">
+  <div class="llm-chat-header-{$uid}">
+    <div class="llm-chat-title-{$uid}">{$labeltitle}</div>
+    <div class="llm-chat-actions-{$uid}">
+      <button type="button" id="llm_open_{$uid}" class="llm-btn-{$uid}">{$labelopen}</button>
+      <button type="button" id="llm_clear_{$uid}" class="llm-btn-{$uid}">{$labelclear}</button>
+    </div>
+  </div>
+
+  <div id="llm_chat_window_{$uid}" class="llm-chat-window-{$uid}"></div>
+
+  <div class="llm-chat-inputwrap-{$uid}">
+    <textarea id="llm_input_{$uid}" class="llm-input-{$uid}" rows="2" placeholder="{$labelplaceholder}"></textarea>
+    <button type="button" id="llm_send_{$uid}" class="llm-send-{$uid}">{$labelsend}</button>
+  </div>
+</div>
+
+<script>
+(function() {
+  const apiUrl = {$apiurl_js};
+  const openUrl = {$openurl_js};
+
+  const chatWindow = document.getElementById("llm_chat_window_{$uid}");
+  const sendBtn = document.getElementById("llm_send_{$uid}");
+  const input = document.getElementById("llm_input_{$uid}");
+  const openBtn = document.getElementById("llm_open_{$uid}");
+  const clearBtn = document.getElementById("llm_clear_{$uid}");
+
+  function addMessage(text, who) {
+    const div = document.createElement("div");
+    div.className = (who === "user") ? "llm-msg-user-{$uid}" : "llm-msg-bot-{$uid}";
+    div.textContent = text;
+    chatWindow.appendChild(div);
+    chatWindow.scrollTop = chatWindow.scrollHeight;
+    return div;
+  }
+
+  function addThinking() {
+    const div = document.createElement("div");
+    div.className = "llm-msg-bot-{$uid}";
+    div.innerHTML = '<span class="llm-spinner-{$uid}"></span>{$labelthinking}';
+    chatWindow.appendChild(div);
+    chatWindow.scrollTop = chatWindow.scrollHeight;
+    return div;
+  }
+
+  function addSources(sources) {
+    const uniq = [...new Set((sources || []).filter(Boolean))];
+    if (!uniq.length) return;
+
+    const wrap = document.createElement("div");
+    wrap.className = "llm-msg-bot-{$uid}";
+
+    const label = document.createElement("div");
+    label.className = "llm-sources-{$uid}";
+    label.textContent = "{$labelsources}";
+    wrap.appendChild(label);
+
+    const chips = document.createElement("div");
+    uniq.forEach(s => {
+      const chip = document.createElement("span");
+      chip.className = "llm-chip-{$uid}";
+      chip.textContent = s;
+      chips.appendChild(chip);
+    });
+    wrap.appendChild(chips);
+
+    chatWindow.appendChild(wrap);
+    chatWindow.scrollTop = chatWindow.scrollHeight;
+  }
+
+  async function sendMessage() {
+    const q = (input.value || "").trim();
+    if (!q) return;
+
+    addMessage(q, "user");
+    input.value = "";
+
+    const thinkingEl = addThinking();
+
+    try {
+      const res = await fetch(apiUrl, {
+        method: "POST",
+        headers: {"Content-Type": "application/x-www-form-urlencoded"},
+        body: new URLSearchParams({
+          sesskey: M.cfg.sesskey,
+          question: q,
+          courseid: "{$courseid}"
+        })
+      });
+
+      const text = await res.text();
+      let data = {};
+      try { data = JSON.parse(text); } catch (e) { data = {answer: "Error: invalid JSON response."}; }
+
+      thinkingEl.remove();
+      addMessage(data.answer || "No answer returned.", "bot");
+      addSources(data.sources || []);
+    } catch (err) {
+      thinkingEl.remove();
+      addMessage("Error contacting the assistant. Please try again.", "bot");
+    }
+  }
+
+  openBtn.addEventListener("click", () => { window.location.href = openUrl; });
+  clearBtn.addEventListener("click", () => { chatWindow.innerHTML = ""; addMessage({$welcome_js}, "bot"); });
+  sendBtn.addEventListener("click", sendMessage);
+
+  input.addEventListener("keydown", (e) => {
+    if (e.key === "Enter" && !e.shiftKey) {
+      e.preventDefault();
+      sendMessage();
+    }
+  });
+
+  addMessage({$welcome_js}, "bot");
+})();
+</script>
+HTML;
+
+        $this->content->footer = '';
         return $this->content;
     }
-
-    $this->content = new stdClass();
-
-    $apiurl = new moodle_url('/blocks/llmassistant/rag_endpoint.php');
-
-    $this->content->text = '
-        <style>
-            /* ---------- SIDEBAR CHAT UI ---------- */
-
-            .llm-chat-container {
-                position: relative;
-                background: #f8f9fa;
-                border: 1px solid #ccc;
-                border-radius: 10px;
-                display: flex;
-                flex-direction: column;
-                height: 450px;
-                max-height: 80vh;
-                transition: all 0.3s ease;
-            }
-
-            /* Fullscreen mode */
-            .llm-chat-fullscreen {
-                position: fixed !important;
-                top: 0; left: 0;
-                width: 100vw !important;
-                height: 100vh !important;
-                z-index: 9999 !important;
-                border-radius: 0 !important;
-            }
-
-            .llm-chat-header {
-                background: #0b5ed7;
-                color: white;
-                padding: 10px;
-                border-radius: 10px 10px 0 0;
-                display: flex;
-                justify-content: space-between;
-                align-items: center;
-            }
-
-            .llm-chat-header button {
-                background: transparent;
-                border: none;
-                color: white;
-                cursor: pointer;
-                font-size: 18px;
-            }
-
-            #llm_chat_window {
-                flex: 1;
-                overflow-y: auto;
-                padding: 12px;
-            }
-
-            .msg-user {
-                background: #d4edda;
-                padding: 10px;
-                margin-bottom: 8px;
-                border-radius: 8px;
-                max-width: 80%;
-                margin-left: auto;
-            }
-
-            .msg-bot {
-                background: #e2e3e5;
-                padding: 10px;
-                margin-bottom: 8px;
-                border-radius: 8px;
-                max-width: 80%;
-            }
-
-            .llm-chat-input {
-                display: flex;
-                padding: 10px;
-                gap: 5px;
-            }
-
-            #llm_input {
-                flex: 1;
-                padding: 8px;
-                border-radius: 6px;
-                border: 1px solid #ccc;
-                resize: none;
-            }
-
-            #llm_send {
-                padding: 8px 12px;
-                background: #0b5ed7;
-                border: none;
-                border-radius: 6px;
-                color: white;
-                cursor: pointer;
-            }
-
-            .llm-chat-fullscreen #llm_chat_window {
-                font-size: 16px;
-                padding: 18px;
-            }
-
-            .llm-chat-fullscreen .llm-chat-input {
-                position: sticky;
-                bottom: 0;
-                background: #f8f9fa;
-            }
-        </style>
-
-        <div id="llm_chat" class="llm-chat-container">
-            <div class="llm-chat-header">
-                <span>LLM Assistant</span>
-                <button id="llm_expand">⤢</button>
-            </div>
-
-            <div id="llm_chat_window"></div>
-
-            <div class="llm-chat-input">
-                <textarea id="llm_input" rows="2" placeholder="Write your question..."></textarea>
-                <button id="llm_send">Submit</button>
-            </div>
-        </div>
-
-        <script>
-        (function() {
-            const chat = document.getElementById("llm_chat");
-            const chatWindow = document.getElementById("llm_chat_window");
-            const sendBtn = document.getElementById("llm_send");
-            const input = document.getElementById("llm_input");
-            const expandBtn = document.getElementById("llm_expand");
-
-            function addMessage(text, type) {
-                const div = document.createElement("div");
-                div.className = type === "user" ? "msg-user" : "msg-bot";
-                div.textContent = text;
-                chatWindow.appendChild(div);
-                chatWindow.scrollTop = chatWindow.scrollHeight;
-            }
-
-            expandBtn.addEventListener("click", () => {
-                chat.classList.toggle("llm-chat-fullscreen");
-                expandBtn.textContent = chat.classList.contains("llm-chat-fullscreen") ? "⤡" : "⤢";
-            });
-
-            async function sendMessage() {
-                const q = input.value.trim();
-                if (!q) return;
-                addMessage(q, "user");
-                input.value = "";
-                addMessage("Thinking...", "bot");
-
-                const res = await fetch("'.$apiurl.'", {
-                    method: "POST",
-                    headers: {"Content-Type": "application/x-www-form-urlencoded"},
-                    body: new URLSearchParams({
-                        sesskey: M.cfg.sesskey,
-                        question: q,
-                        courseid: '.$COURSE->id.'
-                    })
-                });
-
-                const data = await res.json();
-                chatWindow.lastChild.remove();
-                addMessage(data.answer, "bot");
-                
-                if (data.sources && data.sources.length) {
-                addMessage("Sources: " + [...new Set(data.sources)].join(", "), "bot");
-                }
-            }
-
-            sendBtn.addEventListener("click", sendMessage);
-            input.addEventListener("keypress", e => {
-                if (e.key === "Enter") {
-                    e.preventDefault();
-                    sendMessage();
-                }
-            });
-        })();
-        </script>
-    ';
-
-    return $this->content;
-}
 }
