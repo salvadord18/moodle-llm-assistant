@@ -1,49 +1,41 @@
 <?php
+/**
+ * ==============================================
+ * FILE: block_llmassistant.php
+ * PURPOSE: Moodle block sidebar UI (chat preview + open center chat)
+ * ==============================================
+ *
+ * Features:
+ * - Sidebar chat UI (compact)
+ * - Loads server-side history so sidebar matches center chat content
+ * - "Open" navigates to center-panel chat page:
+ *     - Course pages -> chat.php?courseid=<id>
+ *     - Dashboard/site -> global.php (courseid=0)
+ * - "Clear" clears history in DB for this conversation scope
+ *
+ * Notes:
+ * - History is persisted server-side via history_endpoint.php
+ * - Messages are persisted server-side via rag_endpoint.php
+ */
+
 defined('MOODLE_INTERNAL') || die();
 
 class block_llmassistant extends block_base {
 
+    /**
+     * ----------------------------------------------
+     * 1) Block title
+     * ----------------------------------------------
+     */
     public function init() {
         $this->title = get_string('pluginname', 'block_llmassistant');
-
-        /* ==============================================
-            PATCH: Load history into sidebar chat
-            PURPOSE: Sidebar matches center chat content
-            ============================================== */
-
-            async function loadHistory() {
-            try {
-                const res = await fetch("<?php echo (new moodle_url('/blocks/llmassistant/history_endpoint.php'))->out(false); ?>", {
-                method: "POST",
-                headers: {"Content-Type": "application/x-www-form-urlencoded"},
-                body: new URLSearchParams({
-                    sesskey: M.cfg.sesskey,
-                    action: "load",
-                    courseid: <?php echo (int)$COURSE->id; ?>
-                })
-                });
-
-                const data = await res.json();
-                const msgs = data.messages || [];
-                chatWindow.innerHTML = "";
-
-                if (!msgs.length) {
-                addMessage("Hi! Ask me something.", "bot");
-                return;
-                }
-
-                msgs.forEach(m => addMessage(m.message, m.role === "user" ? "user" : "bot"));
-            } catch (e) {
-                // If history fails, show a welcome message.
-                chatWindow.innerHTML = "";
-                addMessage("Hi! Ask me something.", "bot");
-            }
-            }
-
-            // Call on init:
-            loadHistory();
     }
 
+    /**
+     * ----------------------------------------------
+     * 2) Where the block can be shown
+     * ----------------------------------------------
+     */
     public function applicable_formats() {
         return [
             'course-view' => true,
@@ -56,6 +48,11 @@ class block_llmassistant extends block_base {
         return false;
     }
 
+    /**
+     * ----------------------------------------------
+     * 3) Main block rendering (HTML/CSS/JS)
+     * ----------------------------------------------
+     */
     public function get_content() {
         global $COURSE, $PAGE;
 
@@ -65,22 +62,32 @@ class block_llmassistant extends block_base {
 
         $this->content = new stdClass();
 
-        // --- Unique IDs per block instance (avoid DOM collisions) ---
+        // Unique IDs per block instance (avoid DOM collisions).
         $instanceid = $this->instance ? (int)$this->instance->id : 0;
         $uid = 'llm_' . $instanceid;
 
-        // --- Proxy endpoint (Moodle -> FastAPI) ---
+        // Proxy endpoint (Moodle -> FastAPI).
         $apiurl = (new moodle_url('/blocks/llmassistant/rag_endpoint.php'))->out(false);
 
-        // --- Decide where "Open" should go (course vs global) ---
+        // History endpoint (load/clear).
+        $historyurl = (new moodle_url('/blocks/llmassistant/history_endpoint.php'))->out(false);
+
+        // Decide scope:
+        // - Course pages: use course id
+        // - Dashboard/site: use 0 (global)
         $iscourse = (!empty($COURSE->id) && $COURSE->id != SITEID && $PAGE->context->contextlevel == CONTEXT_COURSE);
+        $scope_courseid = $iscourse ? (int)$COURSE->id : 0;
+
+        // Decide where "Open" should go:
+        // - Course pages -> center panel course chat
+        // - Dashboard/site -> center panel global chat
         if ($iscourse) {
             $openurl = (new moodle_url('/blocks/llmassistant/chat.php', ['courseid' => $COURSE->id]))->out(false);
         } else {
             $openurl = (new moodle_url('/blocks/llmassistant/global.php'))->out(false);
         }
 
-        // --- English UI strings (as requested) ---
+        // English UI strings (as requested).
         $labeltitle = 'LLM Assistant';
         $labelopen = 'Open';
         $labelclear = 'Clear';
@@ -88,23 +95,26 @@ class block_llmassistant extends block_base {
         $labelplaceholder = 'Write your question...';
         $labelthinking = 'Thinking...';
         $labelsources = 'Sources:';
-        $labelwelcome = 'Hi! Ask me something.';
+        $labelwelcome_course = 'Hi! Ask me something about this course.';
+        $labelwelcome_global = 'Hi! Ask me about faculty rules and general information.';
 
-        // --- Pre-encode strings for safe JS injection ---
+        // Safe JS injection.
         $apiurl_js = json_encode($apiurl, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
+        $historyurl_js = json_encode($historyurl, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
         $openurl_js = json_encode($openurl, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
-        $welcome_js = json_encode($labelwelcome, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
-
-        $courseid = (int)$COURSE->id;
+        $welcome_js = json_encode($iscourse ? $labelwelcome_course : $labelwelcome_global, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
 
         $this->content->text = <<<HTML
 <style>
-/* ---------- LLM Assistant (Sidebar) UI ---------- */
+/* ==============================================
+   LLM Assistant Sidebar UI
+   ============================================== */
+
 .llm-chat-container-{$uid}{background:#f8f9fa;border:1px solid #d0d7de;border-radius:12px;display:flex;flex-direction:column;height:460px;max-height:80vh;overflow:hidden;font-size:14px}
 .llm-chat-header-{$uid}{background:#0b5ed7;color:#fff;padding:10px 12px;display:flex;justify-content:space-between;align-items:center}
 .llm-chat-title-{$uid}{font-weight:600}
 .llm-chat-actions-{$uid}{display:flex;gap:8px;align-items:center}
-.llm-btn-{$uid}{background:rgba(255,255,255,.15);border:1px solid rgba(255,255,255,.25);color:#fff;border-radius:8px;padding:6px 10px;cursor:pointer;font-size:12px}
+.llm-btn-{$uid}{background:rgba(255,255,255,.15);border:1px solid rgba(255,255,255,.25);color:#fff;border-radius:10px;padding:6px 10px;cursor:pointer;font-size:12px}
 .llm-btn-{$uid}:hover{background:rgba(255,255,255,.22)}
 .llm-chat-window-{$uid}{flex:1;overflow-y:auto;padding:12px;background:#fff}
 .llm-msg-user-{$uid}{background:#d4edda;padding:10px;margin-bottom:8px;border-radius:12px;max-width:85%;margin-left:auto;white-space:pre-wrap}
@@ -115,6 +125,7 @@ class block_llmassistant extends block_base {
 .llm-input-{$uid}{flex:1;padding:8px;border-radius:10px;border:1px solid #c6cbd1;resize:none;outline:none}
 .llm-send-{$uid}{padding:8px 14px;background:#0b5ed7;border:none;border-radius:10px;color:#fff;cursor:pointer}
 .llm-send-{$uid}:hover{background:#0a53be}
+
 .llm-spinner-{$uid}{display:inline-block;width:12px;height:12px;border:2px solid #bbb;border-top-color:#333;border-radius:50%;margin-right:8px;animation:llmspin-{$uid} .8s linear infinite}
 @keyframes llmspin-{$uid}{to{transform:rotate(360deg)}}
 </style>
@@ -137,9 +148,15 @@ class block_llmassistant extends block_base {
 </div>
 
 <script>
+/* ==============================================
+   JS: Sidebar chat logic + history sync
+   ============================================== */
 (function() {
   const apiUrl = {$apiurl_js};
+  const historyUrl = {$historyurl_js};
   const openUrl = {$openurl_js};
+  const scopeCourseId = {$scope_courseid};
+  const welcomeMsg = {$welcome_js};
 
   const chatWindow = document.getElementById("llm_chat_window_{$uid}");
   const sendBtn = document.getElementById("llm_send_{$uid}");
@@ -153,7 +170,6 @@ class block_llmassistant extends block_base {
     div.textContent = text;
     chatWindow.appendChild(div);
     chatWindow.scrollTop = chatWindow.scrollHeight;
-    return div;
   }
 
   function addThinking() {
@@ -190,6 +206,50 @@ class block_llmassistant extends block_base {
     chatWindow.scrollTop = chatWindow.scrollHeight;
   }
 
+  async function loadHistory() {
+    try {
+      const res = await fetch(historyUrl, {
+        method: "POST",
+        headers: {"Content-Type": "application/x-www-form-urlencoded"},
+        body: new URLSearchParams({
+          sesskey: M.cfg.sesskey,
+          action: "load",
+          courseid: scopeCourseId
+        })
+      });
+
+      const data = await res.json();
+      const msgs = data.messages || [];
+
+      chatWindow.innerHTML = "";
+      if (!msgs.length) {
+        addMessage(welcomeMsg, "bot");
+        return;
+      }
+
+      msgs.forEach(m => addMessage(m.message, m.role === "user" ? "user" : "bot"));
+    } catch (e) {
+      chatWindow.innerHTML = "";
+      addMessage(welcomeMsg, "bot");
+    }
+  }
+
+  async function clearHistory() {
+    try {
+      await fetch(historyUrl, {
+        method: "POST",
+        headers: {"Content-Type": "application/x-www-form-urlencoded"},
+        body: new URLSearchParams({
+          sesskey: M.cfg.sesskey,
+          action: "clear",
+          courseid: scopeCourseId
+        })
+      });
+    } catch (e) {}
+    chatWindow.innerHTML = "";
+    addMessage(welcomeMsg, "bot");
+  }
+
   async function sendMessage() {
     const q = (input.value || "").trim();
     if (!q) return;
@@ -206,17 +266,21 @@ class block_llmassistant extends block_base {
         body: new URLSearchParams({
           sesskey: M.cfg.sesskey,
           question: q,
-          courseid: "{$courseid}"
+          courseid: scopeCourseId
         })
       });
 
-      const text = await res.text();
+      const raw = await res.text();
       let data = {};
-      try { data = JSON.parse(text); } catch (e) { data = {answer: "Error: invalid JSON response."}; }
+      try { data = JSON.parse(raw); } catch (e) { data = {answer: "Error: invalid JSON response."}; }
 
       thinkingEl.remove();
+
       addMessage(data.answer || "No answer returned.", "bot");
       addSources(data.sources || []);
+
+      // IMPORTANT: history is saved server-side by rag_endpoint.php,
+      // so reloading history will show the same conversation here and in chat.php.
     } catch (err) {
       thinkingEl.remove();
       addMessage("Error contacting the assistant. Please try again.", "bot");
@@ -224,7 +288,7 @@ class block_llmassistant extends block_base {
   }
 
   openBtn.addEventListener("click", () => { window.location.href = openUrl; });
-  clearBtn.addEventListener("click", () => { chatWindow.innerHTML = ""; addMessage({$welcome_js}, "bot"); });
+  clearBtn.addEventListener("click", clearHistory);
   sendBtn.addEventListener("click", sendMessage);
 
   input.addEventListener("keydown", (e) => {
@@ -234,7 +298,8 @@ class block_llmassistant extends block_base {
     }
   });
 
-  addMessage({$welcome_js}, "bot");
+  // Init: load persisted history so sidebar matches center panel chat.
+  loadHistory();
 })();
 </script>
 HTML;
