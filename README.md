@@ -309,3 +309,10 @@ Quando ligares o PC: start.ps1 (Windows) + start.sh (WSL)
 Quando quiseres ver se está tudo ok: status.sh
 Quando quiseres parar tudo: stop.sh
 Quando só a API está marada: restart_rag.sh
+
+# RUN API:
+cd moodle-docker
+bin/moodle-docker-compose exec webserver bash
+
+cd /var/www/html/blocks/llmassistant/rag
+rag_api:app --host 0.0.0.0 --port 8001
