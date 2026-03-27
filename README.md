@@ -266,7 +266,7 @@ If it fails, re-check the Windows firewall rules in section 4.
 
 
 
-## Verifications:
+## OLLAMA (PowerShell):
 
 # Allow scripts (only once, for current user)
 Set-ExecutionPolicy -Scope CurrentUser RemoteSigned
