@@ -1,4 +1,11 @@
 <?php
+/**
+ * ==============================================
+ * FILE: history_endpoint.php
+ * PURPOSE: AJAX endpoint to load/clear chat history
+ * ==============================================
+ */
+
 require_once(__DIR__ . '/../../config.php');
 
 require_login();

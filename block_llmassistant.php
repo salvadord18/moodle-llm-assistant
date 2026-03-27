@@ -5,6 +5,43 @@ class block_llmassistant extends block_base {
 
     public function init() {
         $this->title = get_string('pluginname', 'block_llmassistant');
+
+        /* ==============================================
+            PATCH: Load history into sidebar chat
+            PURPOSE: Sidebar matches center chat content
+            ============================================== */
+
+            async function loadHistory() {
+            try {
+                const res = await fetch("<?php echo (new moodle_url('/blocks/llmassistant/history_endpoint.php'))->out(false); ?>", {
+                method: "POST",
+                headers: {"Content-Type": "application/x-www-form-urlencoded"},
+                body: new URLSearchParams({
+                    sesskey: M.cfg.sesskey,
+                    action: "load",
+                    courseid: <?php echo (int)$COURSE->id; ?>
+                })
+                });
+
+                const data = await res.json();
+                const msgs = data.messages || [];
+                chatWindow.innerHTML = "";
+
+                if (!msgs.length) {
+                addMessage("Hi! Ask me something.", "bot");
+                return;
+                }
+
+                msgs.forEach(m => addMessage(m.message, m.role === "user" ? "user" : "bot"));
+            } catch (e) {
+                // If history fails, show a welcome message.
+                chatWindow.innerHTML = "";
+                addMessage("Hi! Ask me something.", "bot");
+            }
+            }
+
+            // Call on init:
+            loadHistory();
     }
 
     public function applicable_formats() {

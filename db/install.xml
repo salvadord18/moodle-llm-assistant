@@ -1,4 +1,10 @@
 <?xml version="1.0" encoding="UTF-8" ?>
+<!--
+  ==============================================
+  FILE: install.xml
+  PURPOSE: Create DB tables for chat history
+  ==============================================
+-->
 <XMLDB PATH="blocks/llmassistant/db" VERSION="2026032700" COMMENT="LLM Assistant tables"
   xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
   xsi:noNamespaceSchemaLocation="../../../lib/xmldb/xmldb.xsd">
