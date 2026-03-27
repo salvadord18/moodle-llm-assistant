@@ -1,83 +1,95 @@
 <?php
-/**
- * ==============================================
- * FILE: rag_endpoint.php
- * PURPOSE: Moodle -> FastAPI proxy + history persistence
- * ==============================================
- *
- * Responsibilities:
- * - Require login + sesskey
- * - Receive question + courseid
- * - Call FastAPI /ask (running inside the same container on 127.0.0.1:8001)
- * - Always return valid JSON
- * - Always persist chat history (user + assistant) in Moodle DB
- */
+// Always return JSON (even on errors)
+
+define('AJAX_SCRIPT', true);
 
 require_once(__DIR__ . '/../../config.php');
 
-require_login();
-require_sesskey();
+@ini_set('display_errors', '0'); // prevent PHP warnings from breaking JSON
+@ini_set('html_errors', '0');
 
-$question = required_param('question', PARAM_TEXT);
-$courseid = required_param('courseid', PARAM_INT);
-$userid = $USER->id;
+header('Content-Type: application/json; charset=utf-8');
 
-// ----------------------------------------------
-// History manager (server-side persistence)
-// ----------------------------------------------
-require_once($CFG->dirroot . '/blocks/llmassistant/classes/local/history_manager.php');
-use block_llmassistant\local\history_manager;
+// Capture any accidental output so JSON stays clean.
+ob_start();
 
-// Save user message always
-history_manager::save_message($userid, $courseid, 'user', $question);
+try {
+    require_login();
+    require_sesskey();
 
-// ----------------------------------------------
-// Call FastAPI (inside same container)
-// ----------------------------------------------
-$apiurl = "http://127.0.0.1:8001/ask";
+    $question = required_param('question', PARAM_TEXT);
+    $courseid = required_param('courseid', PARAM_INT);
 
-$payload = json_encode([
-    "question" => $question,
-    "courseid" => $courseid,
-    "userid" => $userid,
-]);
+    // FastAPI runs inside the SAME webserver container.
+    $apiurl = 'http://127.0.0.1:8001/ask';
 
-$ch = curl_init($apiurl);
-curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
-curl_setopt($ch, CURLOPT_HTTPHEADER, ["Content-Type: application/json"]);
-curl_setopt($ch, CURLOPT_POST, true);
-curl_setopt($ch, CURLOPT_POSTFIELDS, $payload);
-curl_setopt($ch, CURLOPT_TIMEOUT, 120);
+    $payload = json_encode([
+        'question' => $question,
+        'courseid' => $courseid,
+        'userid'   => $USER->id,
+    ]);
 
-$response = curl_exec($ch);
-$httpcode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
-$curlerr = curl_error($ch);
-curl_close($ch);
+    $ch = curl_init($apiurl);
+    curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+    curl_setopt($ch, CURLOPT_HTTPHEADER, ['Content-Type: application/json']);
+    curl_setopt($ch, CURLOPT_POST, true);
+    curl_setopt($ch, CURLOPT_POSTFIELDS, $payload);
+    curl_setopt($ch, CURLOPT_CONNECTTIMEOUT, 5);
+    curl_setopt($ch, CURLOPT_TIMEOUT, 60);
 
-header("Content-Type: application/json");
+    $response = curl_exec($ch);
 
-// ----------------------------------------------
-// Error handling: always return valid JSON
-// ----------------------------------------------
-if ($response === false || $httpcode >= 400) {
-    $msg = "Error: the RAG API returned HTTP $httpcode.";
-    if (!empty($curlerr)) {
-        $msg .= " Curl error: $curlerr";
+    if ($response === false) {
+        $err = curl_error($ch);
+        curl_close($ch);
+        ob_end_clean();
+        echo json_encode([
+            'answer'  => 'Error: cannot reach the RAG API. Make sure uvicorn is running on 127.0.0.1:8001.',
+            'sources' => [],
+            'debug'   => 'cURL error: ' . $err,
+        ]);
+        exit;
     }
-    $out = ["answer" => $msg . " Check /tmp/rag_api.log.", "sources" => []];
 
-    // Save assistant message even on error (so history reflects what happened)
-    history_manager::save_message($userid, $courseid, 'assistant', $out["answer"]);
+    $httpcode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+    curl_close($ch);
 
-    echo json_encode($out);
+    if ($httpcode < 200 || $httpcode >= 300) {
+        ob_end_clean();
+        echo json_encode([
+            'answer'  => 'Error: the RAG API returned HTTP ' . $httpcode . '. Check /tmp/rag_api.log.',
+            'sources' => [],
+            'debug'   => 'Raw response: ' . $response,
+        ]);
+        exit;
+    }
+
+    $data = json_decode($response, true);
+    if (!is_array($data)) {
+        ob_end_clean();
+        echo json_encode([
+            'answer'  => 'Error: invalid JSON from the RAG API.',
+            'sources' => [],
+            'debug'   => 'Raw response: ' . $response,
+        ]);
+        exit;
+    }
+
+    // Clean output buffer and return stable JSON.
+    ob_end_clean();
+    echo json_encode([
+        'answer'  => $data['answer'] ?? 'No answer returned.',
+        'sources' => $data['sources'] ?? [],
+    ]);
+    exit;
+
+} catch (Throwable $e) {
+    // Always return JSON even on Moodle exceptions.
+    ob_end_clean();
+    echo json_encode([
+        'answer'  => 'Error: request failed (server-side).',
+        'sources' => [],
+        'debug'   => get_class($e) . ': ' . $e->getMessage(),
+    ]);
     exit;
 }
-
-// ----------------------------------------------
-// Save assistant message (happy path)
-// ----------------------------------------------
-$decoded = json_decode($response, true);
-$answer = is_array($decoded) ? ($decoded["answer"] ?? "") : "";
-history_manager::save_message($userid, $courseid, 'assistant', $answer);
-
-echo $response;
