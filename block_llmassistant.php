@@ -272,7 +272,16 @@ class block_llmassistant extends block_base {
 
       const raw = await res.text();
       let data = {};
-      try { data = JSON.parse(raw); } catch (e) { data = {answer: "Error: invalid JSON response."}; }
+
+      try {
+          data = JSON.parse(raw);
+      } catch (e) {
+          data = {
+              answer: "Error: invalid JSON response from server.",
+              sources: [],
+              debug: raw
+          };
+      }
 
       if (data.debug) {
           console.warn("LLM debug:", data.debug);
@@ -280,10 +289,17 @@ class block_llmassistant extends block_base {
 
       thinkingEl.remove();
 
-      addMessage(data.answer || "No answer returned.", "bot");
-      if (Array.isArray(data.sources) &&
+      const answer =
+          (typeof data.answer === "string" && data.answer.trim() !== "")
+              ? data.answer.trim()
+              : "Error: empty or invalid assistant response.";
+
+      addMessage(answer, "bot");
+
+      if (
+          Array.isArray(data.sources) &&
           data.sources.length &&
-          data.answer !== "The provided PDFs do not contain this information."
+          answer !== "The provided PDFs do not contain this information."
       ) {
           addSources(data.sources);
       }

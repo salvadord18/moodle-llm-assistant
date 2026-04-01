@@ -32,11 +32,11 @@ SYSTEM_COURSE_FILE = "system_course.txt"
 SYSTEM_GLOBAL_FILE = "system_global.txt"
 STYLE_FILE = "style.txt"
 
-TOP_K = int(os.getenv("LLMASSISTANT_TOP_K", "12"))
+TOP_K = int(os.getenv("LLMASSISTANT_TOP_K", "5"))
 
 # Cosine distance threshold: smaller is better. Tune as needed.
 # If min distance is higher than this, we treat it as "no relevant context".
-DISTANCE_THRESHOLD = float(os.getenv("LLMASSISTANT_DISTANCE_THRESHOLD", "0.70"))
+DISTANCE_THRESHOLD = float(os.getenv("LLMASSISTANT_DISTANCE_THRESHOLD", "0.85"))
 
 client = PersistentClient(path=CHROMA_DB_PATH)
 app = FastAPI()
@@ -61,6 +61,33 @@ def build_system_prompt(courseid: int) -> str:
     return "\n\n".join(parts).strip()
 
 def ollama_generate(prompt: str) -> str:
+    payload = {"model": LLM_MODEL, "prompt": prompt, "stream": False}
+    headers = {"Connection": "close"}
+    last_err = None
+
+    for attempt in range(4):
+        try:
+            r = _session.post(
+                OLLAMA_GEN_URL,
+                json=payload,
+                headers=headers,
+                timeout=(5, 120)
+            )
+            r.raise_for_status()
+
+            data = r.json()
+            response = (data.get("response") or "").strip()
+
+            if not response:
+                raise RuntimeError(f"Ollama returned empty response: {data}")
+
+            return response
+
+        except Exception as e:
+            last_err = e
+            time.sleep(min(2.0, 0.2 * (2 ** attempt)))
+
+    raise RuntimeError(f"Ollama generate failed: {last_err}")
     payload = {"model": LLM_MODEL, "prompt": prompt, "stream": False}
     headers = {"Connection": "close"}
     last_err = None
@@ -115,11 +142,16 @@ def ask(data: Query):
     sources = list(dict.fromkeys(sources))
 
     # Build context only if we have relevant results
-    if not docs or (min_dist is not None and min_dist > DISTANCE_THRESHOLD):
-        # No relevant context -> respond strictly per RAG rule
+    if not docs:
         return {
             "answer": "The provided PDFs do not contain this information.",
-            "sources": []
+            "sources": [],
+            "debug": {
+                "min_dist": min_dist,
+                "top_sources": sources,
+                "top_k": TOP_K,
+                "threshold": DISTANCE_THRESHOLD
+            }
         }
 
     context = ""
@@ -148,6 +180,11 @@ ANSWER:
 
     try:
         answer = ollama_generate(prompt)
+        if not answer.strip():
+            return {
+                "answer": "Error: the model returned an empty response.",
+                "sources": sources
+            }
     except Exception:
         # Always return JSON; never break the UI
         return {"answer": "Error: assistant backend temporarily unavailable. Please try again.", "sources": sources}

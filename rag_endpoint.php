@@ -71,7 +71,10 @@ try {
         exit;
     }
 
-    $answer = $data['answer'] ?? 'No answer returned.';
+    $answer = trim((string)($data['answer'] ?? ''));
+    if ($answer === '') {
+        $answer = 'Error: empty answer returned by RAG backend.';
+    }
     $sources = $data['sources'] ?? [];
 
     // Persist history server-side.

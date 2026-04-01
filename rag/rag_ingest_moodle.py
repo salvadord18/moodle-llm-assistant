@@ -44,8 +44,8 @@ DB = {
     "password": os.getenv("MOODLE_DB_PASSWORD", "CHANGE_ME"),
 }
 
-CHUNK_SIZE = 2500
-CHUNK_OVERLAP = 300
+CHUNK_SIZE = 1000
+CHUNK_OVERLAP = 175
 
 # Moodle context levels
 COURSE_CONTEXTLEVEL = 50
