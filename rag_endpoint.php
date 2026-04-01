@@ -1,16 +1,13 @@
 <?php
-// Always return JSON (even on errors)
-
 define('AJAX_SCRIPT', true);
 
 require_once(__DIR__ . '/../../config.php');
+require_once($CFG->dirroot . '/blocks/llmassistant/classes/local/history_manager.php');
 
-@ini_set('display_errors', '0'); // prevent PHP warnings from breaking JSON
+@ini_set('display_errors', '0');
 @ini_set('html_errors', '0');
-
 header('Content-Type: application/json; charset=utf-8');
 
-// Capture any accidental output so JSON stays clean.
 ob_start();
 
 try {
@@ -20,9 +17,7 @@ try {
     $question = required_param('question', PARAM_TEXT);
     $courseid = required_param('courseid', PARAM_INT);
 
-    // FastAPI runs inside the SAME webserver container.
     $apiurl = 'http://127.0.0.1:8001/ask';
-
     $payload = json_encode([
         'question' => $question,
         'courseid' => $courseid,
@@ -43,10 +38,11 @@ try {
         $err = curl_error($ch);
         curl_close($ch);
         ob_end_clean();
+
         echo json_encode([
             'answer'  => 'Error: cannot reach the RAG API. Make sure uvicorn is running on 127.0.0.1:8001.',
             'sources' => [],
-            'debug'   => 'cURL error: ' . $err,
+            'debug'   => $err,
         ]);
         exit;
     }
@@ -59,7 +55,7 @@ try {
         echo json_encode([
             'answer'  => 'Error: the RAG API returned HTTP ' . $httpcode . '. Check /tmp/rag_api.log.',
             'sources' => [],
-            'debug'   => 'Raw response: ' . $response,
+            'debug'   => $response,
         ]);
         exit;
     }
@@ -70,21 +66,26 @@ try {
         echo json_encode([
             'answer'  => 'Error: invalid JSON from the RAG API.',
             'sources' => [],
-            'debug'   => 'Raw response: ' . $response,
+            'debug'   => $response,
         ]);
         exit;
     }
 
-    // Clean output buffer and return stable JSON.
+    $answer = $data['answer'] ?? 'No answer returned.';
+    $sources = $data['sources'] ?? [];
+
+    // Persist history server-side.
+    \block_llmassistant\local\history_manager::add_message($USER->id, $courseid, 'user', $question);
+    \block_llmassistant\local\history_manager::add_message($USER->id, $courseid, 'assistant', $answer);
+
     ob_end_clean();
     echo json_encode([
-        'answer'  => $data['answer'] ?? 'No answer returned.',
-        'sources' => $data['sources'] ?? [],
+        'answer'  => $answer,
+        'sources' => $sources,
     ]);
     exit;
 
 } catch (Throwable $e) {
-    // Always return JSON even on Moodle exceptions.
     ob_end_clean();
     echo json_encode([
         'answer'  => 'Error: request failed (server-side).',

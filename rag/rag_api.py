@@ -36,7 +36,7 @@ TOP_K = int(os.getenv("LLMASSISTANT_TOP_K", "12"))
 
 # Cosine distance threshold: smaller is better. Tune as needed.
 # If min distance is higher than this, we treat it as "no relevant context".
-DISTANCE_THRESHOLD = float(os.getenv("LLMASSISTANT_DISTANCE_THRESHOLD", "0.45"))
+DISTANCE_THRESHOLD = float(os.getenv("LLMASSISTANT_DISTANCE_THRESHOLD", "0.70"))
 
 client = PersistentClient(path=CHROMA_DB_PATH)
 app = FastAPI()
@@ -119,7 +119,7 @@ def ask(data: Query):
         # No relevant context -> respond strictly per RAG rule
         return {
             "answer": "The provided PDFs do not contain this information.",
-            "sources": sources
+            "sources": []
         }
 
     context = ""

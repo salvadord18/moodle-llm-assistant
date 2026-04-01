@@ -1,11 +1,7 @@
-# ==============================================
-# FILE: style.txt
-# PURPOSE: Response style guidelines (applied to all modes)
-# ==============================================
-
 Style rules:
 - Be concise and structured.
 - Prefer bullet points for lists.
 - Keep quotes short (max 1–2 lines).
 - Use clear headings when helpful (e.g., "Answer:", "Sources:").
+- If there are no sources, do not include a "Sources:" section.
 - Do not include irrelevant context text.

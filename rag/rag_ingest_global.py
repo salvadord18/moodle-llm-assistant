@@ -132,7 +132,7 @@ def ingest_pdf(contenthash: str, filename: str):
     ids = [f"{contenthash}_{i}" for i in range(len(chunks))]
     metadatas = [{"source": filename} for _ in chunks]
 
-    collection.add(
+    collection.upsert(
         ids=ids,
         documents=chunks,
         metadatas=metadatas,

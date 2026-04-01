@@ -302,6 +302,11 @@ cd ~/dev/moodle-lab/moodle-docker
 bin/moodle-docker-compose exec webserver bash -lc "rm -rf /var/www/moodledata/chroma_db/*"
 bin/moodle-docker-compose exec webserver bash -lc "python3 /rag_ingest_moodle.py"
 
+# COPY
+
+docker cp ~/dev/moodle-lab/moodle/blocks/llmassistant/rag/rag_api.py moodle-docker-webserver-1:/var/www/html/blocks/llmassistant/rag/rag_api.py
+docker cp ~/dev/moodle-lab/moodle/blocks/llmassistant/rag/rag_ingest_global.py   moodle-docker-webserver-1:/rag_ingest_global.py
+docker cp ~/dev/moodle-lab/moodle/blocks/llmassistant/rag/rag_ingest_moodle.py moodle-docker-webserver-1:/rag_ingest_moodle.py
 
 Recomendações práticas:
 
@@ -315,4 +320,4 @@ cd moodle-docker
 bin/moodle-docker-compose exec webserver bash
 
 cd /var/www/html/blocks/llmassistant/rag
-rag_api:app --host 0.0.0.0 --port 8001
+uvicorn rag_api:app --host 0.0.0.0 --port 8001

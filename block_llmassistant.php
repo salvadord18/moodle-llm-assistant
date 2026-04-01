@@ -274,13 +274,22 @@ class block_llmassistant extends block_base {
       let data = {};
       try { data = JSON.parse(raw); } catch (e) { data = {answer: "Error: invalid JSON response."}; }
 
+      if (data.debug) {
+          console.warn("LLM debug:", data.debug);
+      }
+
       thinkingEl.remove();
 
       addMessage(data.answer || "No answer returned.", "bot");
-      addSources(data.sources || []);
+      if (Array.isArray(data.sources) &&
+          data.sources.length &&
+          data.answer !== "The provided PDFs do not contain this information."
+      ) {
+          addSources(data.sources);
+      }
 
-      // IMPORTANT: history is saved server-side by rag_endpoint.php,
-      // so reloading history will show the same conversation here and in chat.php.
+      // History is managed server-side via history_endpoint.php.
+      // Message persistence depends on rag_endpoint.php implementation.
     } catch (err) {
       thinkingEl.remove();
       addMessage("Error contacting the assistant. Please try again.", "bot");
