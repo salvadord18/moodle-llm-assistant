@@ -326,3 +326,10 @@ uvicorn rag_api:app --host 0.0.0.0 --port 8001
 curl -s -X POST http://127.0.0.1:8001/ask \
   -H 'Content-Type: application/json' \
   -d '{"question":"Who are the teachers of this course?","courseid":2,"userid":1}'
+
+# DEBUG MODE
+export LLMASSISTANT_DEBUG=1
+export LLMASSISTANT_DISTANCE_THRESHOLD=0.96
+export LLMASSISTANT_TOP_K=20
+export LLMASSISTANT_MAX_CHUNKS=10
+uvicorn rag_api:app --host 0.0.0.0 --port 8001

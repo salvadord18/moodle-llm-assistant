@@ -32,10 +32,7 @@ OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://host.docker.internal:1143
 OLLAMA_GEN_URL = f"{OLLAMA_BASE_URL}/api/generate"
 LLM_MODEL = os.getenv("OLLAMA_LLM_MODEL", "llama3.2")
 
-PROMPTS_DIR = os.getenv(
-    "LLMASSISTANT_PROMPTS_DIR",
-    "/var/www/html/blocks/llmassistant/rag/prompts"
-)
+PROMPTS_DIR = os.getenv("LLMASSISTANT_PROMPTS_DIR", "/var/www/html/blocks/llmassistant/rag/prompts")
 SYSTEM_COURSE_FILE = "system_course.txt"
 SYSTEM_GLOBAL_FILE = "system_global.txt"
 STYLE_FILE = "style.txt"
@@ -45,7 +42,6 @@ DISTANCE_THRESHOLD = float(os.getenv("LLMASSISTANT_DISTANCE_THRESHOLD", "0.96"))
 MAX_CHUNKS = int(os.getenv("LLMASSISTANT_MAX_CHUNKS", "10"))
 MAX_CONTEXT_CHARS = int(os.getenv("LLMASSISTANT_MAX_CONTEXT_CHARS", "8000"))
 
-# Hybrid rerank weights (tende a funcionar melhor com mais peso lexical em perguntas curtas)
 ALPHA_VEC = float(os.getenv("LLMASSISTANT_RERANK_ALPHA", "0.55"))  # vector
 BETA_LEX  = float(os.getenv("LLMASSISTANT_RERANK_BETA", "0.45"))   # lexical
 
@@ -56,11 +52,10 @@ GEN_TEMPERATURE = float(os.getenv("LLMASSISTANT_TEMPERATURE", "0.1"))
 GEN_TOP_P = float(os.getenv("LLMASSISTANT_TOP_P", "0.9"))
 GEN_NUM_CTX = int(os.getenv("LLMASSISTANT_NUM_CTX", "2048"))
 
-# Context compression
+# Context compression (recommended ON)
 COMPRESS_CONTEXT = os.getenv("LLMASSISTANT_COMPRESS_CONTEXT", "1").lower() in ("1", "true", "yes")
 MAX_LINES_PER_CHUNK = int(os.getenv("LLMASSISTANT_MAX_LINES_PER_CHUNK", "10"))
 
-# A small generic stopword list to build keyword queries (language-agnostic-ish)
 STOPWORDS = {
     "the","a","an","and","or","of","to","in","on","for","with","is","are","was","were",
     "this","that","these","those","who","what","when","where","why","how",
@@ -68,6 +63,19 @@ STOPWORDS = {
     "do","does","did",
     "course","lecture","pdf"
 }
+
+SYNONYMS = {
+    # generic academic/admin synonyms (global)
+    "teachers": ["lecturer", "instructor", "professor", "faculty", "email", "contact"],
+    "teacher": ["lecturer", "instructor", "professor", "email", "contact"],
+    "lecturer": ["teacher", "instructor", "professor", "email", "contact"],
+    "deadline": ["due", "submission", "submit", "date"],
+    "exam": ["test", "assessment", "evaluation"],
+    "grade": ["grading", "assessment", "evaluation", "criteria"],
+    "thesis": ["dissertation", "proposal", "supervisor", "steps", "procedure"],
+}
+
+EMAIL_RE = re.compile(r"[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}")
 
 # -----------------------------
 # INIT
@@ -78,10 +86,12 @@ embedding_fn = DefaultEmbeddingFunction()
 app = FastAPI()
 _session = requests.Session()
 
+
 class Query(BaseModel):
     question: str
     courseid: int
     userid: int
+
 
 # -----------------------------
 # HELPERS
@@ -93,14 +103,14 @@ def load_text(path: str) -> str:
     except Exception:
         return ""
 
+
 def build_system_prompt(courseid: int) -> str:
     style = load_text(os.path.join(PROMPTS_DIR, STYLE_FILE))
-    system = load_text(os.path.join(
-        PROMPTS_DIR,
-        SYSTEM_GLOBAL_FILE if courseid == 0 else SYSTEM_COURSE_FILE
-    ))
+    system_file = SYSTEM_GLOBAL_FILE if courseid == 0 else SYSTEM_COURSE_FILE
+    system = load_text(os.path.join(PROMPTS_DIR, system_file))
     parts = [p for p in (system, style) if p]
     return "\n\n".join(parts).strip()
+
 
 def ollama_generate(prompt: str) -> str:
     payload = {
@@ -127,11 +137,16 @@ def ollama_generate(prompt: str) -> str:
 
     raise RuntimeError(f"Ollama generate failed: {last_err}")
 
+
 def ollama_rewrite_query(q: str) -> str:
-    """Generic query rewriting: improve retrieval by adding synonyms/keywords."""
+    """
+    Generic query rewriting to improve retrieval.
+    Returns ONE line with synonyms and document-style labels.
+    """
     rewrite_prompt = (
-        "Rewrite the user question into a search query to find the answer in lecture PDFs. "
-        "Add useful synonyms and keywords. Return ONE line only.\n\n"
+        "Rewrite the user question into a search query for lecture PDFs. "
+        "Add synonyms AND common document labels used in slides (e.g., Lecturer, Instructor, Professor, Email, Contact, Assessment, Deadline, Exam). "
+        "Keep it short. Return ONE line only.\n\n"
         f"Question: {q}\n"
         "Search query:"
     )
@@ -149,25 +164,38 @@ def ollama_rewrite_query(q: str) -> str:
     except Exception:
         return ""
 
+
 def tokenize(text: str):
     text = (text or "").lower()
+    # FIX: correct regex (no escaped brackets)
     return set(re.findall(r"[a-zA-ZÀ-ÿ0-9]+", text))
+
 
 def build_keyword_query(q: str) -> str:
     toks = [t for t in re.findall(r"[a-zA-ZÀ-ÿ0-9]+", (q or "").lower()) if t not in STOPWORDS]
-    # keep only a small set of keywords to avoid noise
     toks = toks[:10]
-    return " ".join(toks).strip()
+
+    expanded = []
+    for t in toks:
+        expanded.append(t)
+        for syn in SYNONYMS.get(t, []):
+            expanded.append(syn)
+
+    # dedupe preserving order
+    out = list(dict.fromkeys(expanded))
+    return " ".join(out[:18]).strip()
+
 
 def lexical_overlap_score(query: str, doc: str) -> float:
-    q = tokenize(query)
-    if not q:
+    qset = tokenize(query)
+    if not qset:
         return 0.0
-    d = tokenize(doc or "")
-    if not d:
+    dset = tokenize(doc or "")
+    if not dset:
         return 0.0
-    inter = q.intersection(d)
-    return len(inter) / max(1, len(q))
+    inter = qset.intersection(dset)
+    return len(inter) / max(1, len(qset))
+
 
 def unique_sources(metas):
     sources = []
@@ -176,52 +204,78 @@ def unique_sources(metas):
             sources.append(m["source"])
     return list(dict.fromkeys(sources))
 
+
 def doc_key(doc: str, meta: dict):
     src = (meta or {}).get("source", "")
     h = hashlib.md5((src + "|" + (doc or "")).encode("utf-8", errors="ignore")).hexdigest()
     return h
 
+
 def compress_doc(doc: str, query_text: str) -> str:
     """
     Generic context compression:
-    Keep only lines that share tokens with the query (+ small neighbors).
-    This helps surface 'Lecturer:' and emails without special handlers.
+    - Keep lines that share tokens with the query (+ neighbors)
+    - Always keep email-like lines and short structured "Label: Value" lines
     """
     if not COMPRESS_CONTEXT:
         return doc or ""
 
     lines = (doc or "").splitlines()
     qtokens = tokenize(query_text)
-    if not qtokens or not lines:
+    if not lines:
         return doc or ""
 
     keep = []
-    for i, line in enumerate(lines):
-        ltoks = tokenize(line)
-        if ltoks and (ltoks & qtokens):
-            # keep this line + neighbors
-            for j in (i-1, i, i+1):
-                if 0 <= j < len(lines):
-                    keep.append(lines[j])
 
-    # dedupe while preserving order
+    for i, line in enumerate(lines):
+        line_stripped = line.strip()
+        if not line_stripped:
+            continue
+
+        email_like = bool(EMAIL_RE.search(line_stripped))
+        structured = (":" in line_stripped and len(line_stripped) <= 120)
+
+        if email_like or structured:
+            keep.append(line_stripped)
+            continue
+
+        ltoks = tokenize(line_stripped)
+        if ltoks and qtokens and (ltoks & qtokens):
+            for j in (i - 1, i, i + 1):
+                if 0 <= j < len(lines):
+                    lj = lines[j].strip()
+                    if lj:
+                        keep.append(lj)
+
+    # dedupe preserving order
     out = []
     seen = set()
     for l in keep:
-        l2 = l.strip()
-        if not l2:
-            continue
-        if l2 not in seen:
-            out.append(l2)
-            seen.add(l2)
+        if l not in seen:
+            out.append(l)
+            seen.add(l)
         if len(out) >= MAX_LINES_PER_CHUNK:
             break
 
     return "\n".join(out) if out else (doc or "")
 
+
+def limit_per_source(items, max_per_source=2):
+    counts = {}
+    out = []
+    for doc, meta, dist, score in items:
+        src = (meta or {}).get("source", "unknown.pdf")
+        counts[src] = counts.get(src, 0) + 1
+        if counts[src] <= max_per_source:
+            out.append((doc, meta, dist, score))
+    return out
+
+
 def pack_context(ranked_items, query_text: str):
     context = []
+    used_sources = []
     total = 0
+
     for doc, meta, dist, score in ranked_items:
         src = (meta or {}).get("source", "unknown.pdf")
         d2 = compress_doc(doc, query_text)
@@ -229,8 +283,12 @@ def pack_context(ranked_items, query_text: str):
         if total + len(block) > MAX_CONTEXT_CHARS:
             break
         context.append(block)
+        used_sources.append(src)
         total += len(block)
-    return "\n".join(context)
+
+    used_sources = list(dict.fromkeys(used_sources))
+    return "\n".join(context), used_sources
+
 
 # -----------------------------
 # ROUTES
@@ -252,7 +310,6 @@ def ask(data: Query):
         return resp
 
     queries = [q]
-
     q_kw = build_keyword_query(q)
     if q_kw and q_kw.lower() != q.lower():
         queries.append(q_kw)
@@ -279,7 +336,6 @@ def ask(data: Query):
     all_metas = results.get("metadatas") or []
     all_dists = results.get("distances") or []
 
-    # For lexical overlap we use the combined query text (original + rewrite + keywords)
     q_mix = " ".join([x for x in [q, q_kw, q2] if x]).strip()
 
     merged = {}
@@ -318,7 +374,6 @@ def ask(data: Query):
             resp["debug"] = {"reason": "no_candidates", "queries": queries}
         return resp
 
-    # Sort by score desc, then dist asc
     candidates.sort(key=lambda x: (-x[3], x[2]))
     best_dist = min([c[2] for c in candidates]) if candidates else None
 
@@ -333,9 +388,12 @@ def ask(data: Query):
             }
         return resp
 
+    # Reduce redundant chunks from same source
+    candidates = limit_per_source(candidates, max_per_source=2)
+
     top = candidates[:MAX_CHUNKS]
-    context = pack_context(top, q_mix)
-    sources = unique_sources([t[1] for t in top])
+    context, used_sources = pack_context(top, q_mix)
+    sources = used_sources
 
     system_prompt = build_system_prompt(data.courseid)
     if not system_prompt:
@@ -366,15 +424,14 @@ ANSWER:
         return resp
 
     if not answer:
-        resp = {"answer": "Error: empty response from model.", "sources": sources}
-        return resp
+        return {"answer": "Error: empty response from model.", "sources": sources}
 
     resp = {"answer": answer, "sources": sources}
     if DEBUG:
-        # lightweight debug to help tuning without leaking full context
         resp["debug"] = {
             "queries": queries,
             "best_dist": best_dist,
-            "top_sources": sources
+            "top_sources": sources,
+            "context_preview": context[:800]  # first 800 chars only
         }
     return resp

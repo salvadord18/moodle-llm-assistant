@@ -5,3 +5,4 @@ Style rules:
 - Use clear headings when helpful (e.g., "Answer:", "Sources:").
 - If there are no sources, do not include a "Sources:" section.
 - Do not include irrelevant context text.
+- If multiple items are present (e.g., multiple lecturers), list all of them.
