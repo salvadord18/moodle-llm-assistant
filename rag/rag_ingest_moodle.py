@@ -218,7 +218,8 @@ def ingest_pdf_into_collection(collection, contenthash: str, filename: str):
     metadatas = [{"source": filename} for _ in chunks]
 
     try:
-        collection.upsert(ids=ids, documents=chunks, metadatas=metadatas)
+        documents = [f"[SOURCE: {filename}]\n{c}" for c in chunks]
+        collection.upsert(ids=ids, documents=documents, metadatas=metadatas)
         print(f"[OK] Upserted {len(chunks)} chunks from {filename}")
         return len(chunks)
     except Exception as e:

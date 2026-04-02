@@ -1,44 +1,80 @@
 """
-Moodle RAG API — Generic RAG (No Per-Question Handlers)
---------------------------------------------------------
+Moodle RAG API — Generic RAG (Improved Retrieval + Rerank + Context Compression)
+-------------------------------------------------------------------------------
 
-Design:
-- One single RAG pipeline for ALL questions:
-  Retrieve -> Build Context -> Generate
-- Uses Chroma local embeddings via query_texts (no Ollama /api/embed) 
-- Loads system/style prompts from .txt files
-- Uses a distance threshold to decide whether context is relevant (cosine distance: closer to 0 = more similar) 
-- Always returns JSON (never breaks UI)
+Pipeline:
+1) Retrieve top-K candidates from Chroma (multi-query: original + rewrite + keywords)
+2) Rerank with a hybrid score (vector distance + lexical overlap)
+3) Compress + pack best chunks into a bounded context
+4) Generate with Ollama using system/style prompts
 
 Run:
   cd /var/www/html/blocks/llmassistant/rag
   uvicorn rag_api:app --host 0.0.0.0 --port 8001
 """
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI
 from pydantic import BaseModel
 from chromadb import PersistentClient
+from chromadb.utils.embedding_functions import DefaultEmbeddingFunction
 import os
-import requests
+import re
 import time
+import hashlib
+import requests
 
+# -----------------------------
+# CONFIG
+# -----------------------------
 CHROMA_DB_PATH = "/var/www/moodledata/chroma_db"
+
 OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://host.docker.internal:11434")
 OLLAMA_GEN_URL = f"{OLLAMA_BASE_URL}/api/generate"
 LLM_MODEL = os.getenv("OLLAMA_LLM_MODEL", "llama3.2")
 
-PROMPTS_DIR = os.getenv("LLMASSISTANT_PROMPTS_DIR", "/var/www/html/blocks/llmassistant/rag/prompts")
+PROMPTS_DIR = os.getenv(
+    "LLMASSISTANT_PROMPTS_DIR",
+    "/var/www/html/blocks/llmassistant/rag/prompts"
+)
 SYSTEM_COURSE_FILE = "system_course.txt"
 SYSTEM_GLOBAL_FILE = "system_global.txt"
 STYLE_FILE = "style.txt"
 
-TOP_K = int(os.getenv("LLMASSISTANT_TOP_K", "5"))
+TOP_K = int(os.getenv("LLMASSISTANT_TOP_K", "20"))
+DISTANCE_THRESHOLD = float(os.getenv("LLMASSISTANT_DISTANCE_THRESHOLD", "0.96"))
+MAX_CHUNKS = int(os.getenv("LLMASSISTANT_MAX_CHUNKS", "10"))
+MAX_CONTEXT_CHARS = int(os.getenv("LLMASSISTANT_MAX_CONTEXT_CHARS", "8000"))
 
-# Cosine distance threshold: smaller is better. Tune as needed.
-# If min distance is higher than this, we treat it as "no relevant context".
-DISTANCE_THRESHOLD = float(os.getenv("LLMASSISTANT_DISTANCE_THRESHOLD", "1.0"))
+# Hybrid rerank weights (tende a funcionar melhor com mais peso lexical em perguntas curtas)
+ALPHA_VEC = float(os.getenv("LLMASSISTANT_RERANK_ALPHA", "0.55"))  # vector
+BETA_LEX  = float(os.getenv("LLMASSISTANT_RERANK_BETA", "0.45"))   # lexical
 
+DEBUG = os.getenv("LLMASSISTANT_DEBUG", "0").lower() in ("1", "true", "yes")
+ENABLE_QUERY_REWRITE = os.getenv("LLMASSISTANT_QUERY_REWRITE", "1").lower() in ("1", "true", "yes")
+
+GEN_TEMPERATURE = float(os.getenv("LLMASSISTANT_TEMPERATURE", "0.1"))
+GEN_TOP_P = float(os.getenv("LLMASSISTANT_TOP_P", "0.9"))
+GEN_NUM_CTX = int(os.getenv("LLMASSISTANT_NUM_CTX", "2048"))
+
+# Context compression
+COMPRESS_CONTEXT = os.getenv("LLMASSISTANT_COMPRESS_CONTEXT", "1").lower() in ("1", "true", "yes")
+MAX_LINES_PER_CHUNK = int(os.getenv("LLMASSISTANT_MAX_LINES_PER_CHUNK", "10"))
+
+# A small generic stopword list to build keyword queries (language-agnostic-ish)
+STOPWORDS = {
+    "the","a","an","and","or","of","to","in","on","for","with","is","are","was","were",
+    "this","that","these","those","who","what","when","where","why","how",
+    "me","my","your","our","their",
+    "do","does","did",
+    "course","lecture","pdf"
+}
+
+# -----------------------------
+# INIT
+# -----------------------------
 client = PersistentClient(path=CHROMA_DB_PATH)
+embedding_fn = DefaultEmbeddingFunction()
+
 app = FastAPI()
 _session = requests.Session()
 
@@ -47,6 +83,9 @@ class Query(BaseModel):
     courseid: int
     userid: int
 
+# -----------------------------
+# HELPERS
+# -----------------------------
 def load_text(path: str) -> str:
     try:
         with open(path, "r", encoding="utf-8") as f:
@@ -56,39 +95,20 @@ def load_text(path: str) -> str:
 
 def build_system_prompt(courseid: int) -> str:
     style = load_text(os.path.join(PROMPTS_DIR, STYLE_FILE))
-    system = load_text(os.path.join(PROMPTS_DIR, SYSTEM_GLOBAL_FILE if courseid == 0 else SYSTEM_COURSE_FILE))
-    parts = [p for p in [system, style] if p]
+    system = load_text(os.path.join(
+        PROMPTS_DIR,
+        SYSTEM_GLOBAL_FILE if courseid == 0 else SYSTEM_COURSE_FILE
+    ))
+    parts = [p for p in (system, style) if p]
     return "\n\n".join(parts).strip()
 
 def ollama_generate(prompt: str) -> str:
-    payload = {"model": LLM_MODEL, "prompt": prompt, "stream": False}
-    headers = {"Connection": "close"}
-    last_err = None
-
-    for attempt in range(4):
-        try:
-            r = _session.post(
-                OLLAMA_GEN_URL,
-                json=payload,
-                headers=headers,
-                timeout=(5, 120)
-            )
-            r.raise_for_status()
-
-            data = r.json()
-            response = (data.get("response") or "").strip()
-
-            if not response:
-                raise RuntimeError(f"Ollama returned empty response: {data}")
-
-            return response
-
-        except Exception as e:
-            last_err = e
-            time.sleep(min(2.0, 0.2 * (2 ** attempt)))
-
-    raise RuntimeError(f"Ollama generate failed: {last_err}")
-    payload = {"model": LLM_MODEL, "prompt": prompt, "stream": False}
+    payload = {
+        "model": LLM_MODEL,
+        "prompt": prompt,
+        "stream": False,
+        "options": {"temperature": GEN_TEMPERATURE, "top_p": GEN_TOP_P, "num_ctx": GEN_NUM_CTX}
+    }
     headers = {"Connection": "close"}
     last_err = None
 
@@ -96,13 +116,125 @@ def ollama_generate(prompt: str) -> str:
         try:
             r = _session.post(OLLAMA_GEN_URL, json=payload, headers=headers, timeout=(5, 120))
             r.raise_for_status()
-            return r.json().get("response", "")
+            data = r.json()
+            response = (data.get("response") or "").strip()
+            if not response:
+                raise RuntimeError(f"Ollama returned empty response: {data}")
+            return response
         except Exception as e:
             last_err = e
             time.sleep(min(2.0, 0.2 * (2 ** attempt)))
 
     raise RuntimeError(f"Ollama generate failed: {last_err}")
 
+def ollama_rewrite_query(q: str) -> str:
+    """Generic query rewriting: improve retrieval by adding synonyms/keywords."""
+    rewrite_prompt = (
+        "Rewrite the user question into a search query to find the answer in lecture PDFs. "
+        "Add useful synonyms and keywords. Return ONE line only.\n\n"
+        f"Question: {q}\n"
+        "Search query:"
+    )
+    payload = {
+        "model": LLM_MODEL,
+        "prompt": rewrite_prompt,
+        "stream": False,
+        "options": {"temperature": 0.0, "num_ctx": 1024}
+    }
+    try:
+        r = _session.post(OLLAMA_GEN_URL, json=payload, timeout=(5, 60))
+        r.raise_for_status()
+        out = (r.json().get("response") or "").strip()
+        return out.splitlines()[0].strip() if out else ""
+    except Exception:
+        return ""
+
+def tokenize(text: str):
+    text = (text or "").lower()
+    return set(re.findall(r"[a-zA-ZÀ-ÿ0-9]+", text))
+
+def build_keyword_query(q: str) -> str:
+    toks = [t for t in re.findall(r"[a-zA-ZÀ-ÿ0-9]+", (q or "").lower()) if t not in STOPWORDS]
+    # keep only a small set of keywords to avoid noise
+    toks = toks[:10]
+    return " ".join(toks).strip()
+
+def lexical_overlap_score(query: str, doc: str) -> float:
+    q = tokenize(query)
+    if not q:
+        return 0.0
+    d = tokenize(doc or "")
+    if not d:
+        return 0.0
+    inter = q.intersection(d)
+    return len(inter) / max(1, len(q))
+
+def unique_sources(metas):
+    sources = []
+    for m in metas:
+        if m and m.get("source"):
+            sources.append(m["source"])
+    return list(dict.fromkeys(sources))
+
+def doc_key(doc: str, meta: dict):
+    src = (meta or {}).get("source", "")
+    h = hashlib.md5((src + "|" + (doc or "")).encode("utf-8", errors="ignore")).hexdigest()
+    return h
+
+def compress_doc(doc: str, query_text: str) -> str:
+    """
+    Generic context compression:
+    Keep only lines that share tokens with the query (+ small neighbors).
+    This helps surface 'Lecturer:' and emails without special handlers.
+    """
+    if not COMPRESS_CONTEXT:
+        return doc or ""
+
+    lines = (doc or "").splitlines()
+    qtokens = tokenize(query_text)
+    if not qtokens or not lines:
+        return doc or ""
+
+    keep = []
+    for i, line in enumerate(lines):
+        ltoks = tokenize(line)
+        if ltoks and (ltoks & qtokens):
+            # keep this line + neighbors
+            for j in (i-1, i, i+1):
+                if 0 <= j < len(lines):
+                    keep.append(lines[j])
+
+    # dedupe while preserving order
+    out = []
+    seen = set()
+    for l in keep:
+        l2 = l.strip()
+        if not l2:
+            continue
+        if l2 not in seen:
+            out.append(l2)
+            seen.add(l2)
+        if len(out) >= MAX_LINES_PER_CHUNK:
+            break
+
+    return "\n".join(out) if out else (doc or "")
+
+def pack_context(ranked_items, query_text: str):
+    context = []
+    total = 0
+    for doc, meta, dist, score in ranked_items:
+        src = (meta or {}).get("source", "unknown.pdf")
+        d2 = compress_doc(doc, query_text)
+        block = f"[SOURCE: {src}]\n{d2}\n"
+        if total + len(block) > MAX_CONTEXT_CHARS:
+            break
+        context.append(block)
+        total += len(block)
+    return "\n".join(context)
+
+# -----------------------------
+# ROUTES
+# -----------------------------
 @app.post("/ask")
 def ask(data: Query):
     q = (data.question or "").strip()
@@ -112,58 +244,105 @@ def ask(data: Query):
     collection_name = "global_docs" if data.courseid == 0 else f"course_docs_{data.courseid}"
 
     try:
-        collection = client.get_collection(collection_name)
+        collection = client.get_collection(collection_name, embedding_function=embedding_fn)
     except Exception as e:
-        raise HTTPException(status_code=404, detail=f"Collection not found: {collection_name} ({e})")
+        resp = {"answer": "The provided PDFs do not contain this information.", "sources": []}
+        if DEBUG:
+            resp["debug"] = f"Collection not found: {collection_name} ({e})"
+        return resp
 
-    # Retrieve using query_texts (Chroma embeds query using the collection embedding function) 
+    queries = [q]
+
+    q_kw = build_keyword_query(q)
+    if q_kw and q_kw.lower() != q.lower():
+        queries.append(q_kw)
+
+    q2 = ""
+    if ENABLE_QUERY_REWRITE:
+        q2 = ollama_rewrite_query(q)
+        if q2 and q2.lower() not in [x.lower() for x in queries]:
+            queries.append(q2)
+
     try:
         results = collection.query(
-            query_texts=[q],
+            query_texts=queries,
             n_results=TOP_K,
             include=["documents", "metadatas", "distances"]
         )
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Chroma query failed: {e}")
+        resp = {"answer": "Error: retrieval failed.", "sources": []}
+        if DEBUG:
+            resp["debug"] = str(e)
+        return resp
 
-    docs = results["documents"][0]
-    metas = results["metadatas"][0]
-    distances = results.get("distances", [[None]])[0]
+    all_docs = results.get("documents") or []
+    all_metas = results.get("metadatas") or []
+    all_dists = results.get("distances") or []
 
-    # Decide whether context is relevant using the best (minimum) cosine distance 
-    min_dist = None
-    if distances and distances[0] is not None:
-        min_dist = min(distances)
+    # For lexical overlap we use the combined query text (original + rewrite + keywords)
+    q_mix = " ".join([x for x in [q, q_kw, q2] if x]).strip()
 
-    sources = []
-    for m in metas:
-        if m and m.get("source"):
-            sources.append(m["source"])
-    sources = list(dict.fromkeys(sources))
+    merged = {}
+    seen_sources = []
 
-    # Build context only if we have relevant results
-    if not docs:
-        return {
-            "answer": "The provided PDFs do not contain this information.",
-            "sources": [],
-            "debug": {
-                "min_dist": min_dist,
-                "top_sources": sources,
-                "top_k": TOP_K,
-                "threshold": DISTANCE_THRESHOLD
+    for qi in range(len(queries)):
+        docs_i = all_docs[qi] if qi < len(all_docs) else []
+        metas_i = all_metas[qi] if qi < len(all_metas) else []
+        dists_i = all_dists[qi] if qi < len(all_dists) else []
+
+        for doc, meta, dist in zip(docs_i, metas_i, dists_i):
+            if not doc or dist is None:
+                continue
+
+            dist = float(dist)
+            lex = lexical_overlap_score(q_mix, doc)
+            vec_sim = max(0.0, 1.0 - dist)
+            score = ALPHA_VEC * vec_sim + BETA_LEX * lex
+
+            k = doc_key(doc, meta)
+            cur = merged.get(k)
+            if cur is None:
+                merged[k] = (doc, meta, dist, score)
+            else:
+                _, _, d0, s0 = cur
+                if (score > s0) or (score == s0 and dist < d0):
+                    merged[k] = (doc, meta, dist, score)
+
+            if meta and meta.get("source"):
+                seen_sources.append(meta["source"])
+
+    candidates = list(merged.values())
+    if not candidates:
+        resp = {"answer": "The provided PDFs do not contain this information.", "sources": []}
+        if DEBUG:
+            resp["debug"] = {"reason": "no_candidates", "queries": queries}
+        return resp
+
+    # Sort by score desc, then dist asc
+    candidates.sort(key=lambda x: (-x[3], x[2]))
+    best_dist = min([c[2] for c in candidates]) if candidates else None
+
+    if best_dist is not None and best_dist > DISTANCE_THRESHOLD:
+        resp = {"answer": "The provided PDFs do not contain this information.", "sources": []}
+        if DEBUG:
+            resp["debug"] = {
+                "min_dist": best_dist,
+                "threshold": DISTANCE_THRESHOLD,
+                "queries": queries,
+                "top_sources": list(dict.fromkeys(seen_sources))[:10]
             }
-        }
+        return resp
 
-    context = ""
-    for doc, meta in zip(docs, metas):
-        src = meta.get("source", "unknown.pdf") if meta else "unknown.pdf"
-        context += f"[SOURCE: {src}]\n{doc}\n\n"
+    top = candidates[:MAX_CHUNKS]
+    context = pack_context(top, q_mix)
+    sources = unique_sources([t[1] for t in top])
 
     system_prompt = build_system_prompt(data.courseid)
     if not system_prompt:
         system_prompt = (
             "You MUST answer using ONLY the provided CONTEXT.\n"
-            "If the answer is not explicitly present, reply:\n"
+            "Do NOT guess. Do NOT invent details.\n"
+            "If the answer is not explicitly present, reply exactly:\n"
             "\"The provided PDFs do not contain this information.\""
         )
 
@@ -179,33 +358,23 @@ ANSWER:
 """
 
     try:
-        answer = ollama_generate(prompt)
+        answer = ollama_generate(prompt).strip()
     except Exception as e:
-            return {
-                "answer": "Error: LLM generation failed.",
-                "sources": sources,
-                "debug": str(e)
-            }
-
-    if not isinstance(answer, str):
-            return {
-                "answer": "Error: invalid response type from model.",
-                "sources": sources
-            }
-
-    answer = answer.strip()
+        resp = {"answer": "Error: LLM generation failed.", "sources": sources}
+        if DEBUG:
+            resp["debug"] = str(e)
+        return resp
 
     if not answer:
-            return {
-                "answer": "Error: empty response from model.",
-                "sources": sources
-            }
+        resp = {"answer": "Error: empty response from model.", "sources": sources}
+        return resp
 
-    def clean_text(text: str) -> str:
-        return text.replace("\x00", "").strip()
-    
-    print("FINAL ANSWER:", repr(answer))
-    return {
-        "answer": clean_text(answer),
-        "sources": sources
-    }
+    resp = {"answer": answer, "sources": sources}
+    if DEBUG:
+        # lightweight debug to help tuning without leaking full context
+        resp["debug"] = {
+            "queries": queries,
+            "best_dist": best_dist,
+            "top_sources": sources
+        }
+    return resp
