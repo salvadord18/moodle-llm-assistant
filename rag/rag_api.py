@@ -14,7 +14,7 @@ Run:
 """
 
 from fastapi import FastAPI
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from chromadb import PersistentClient
 from chromadb.utils.embedding_functions import DefaultEmbeddingFunction
 import os
@@ -48,13 +48,13 @@ BETA_LEX  = float(os.getenv("LLMASSISTANT_RERANK_BETA", "0.45"))   # lexical
 DEBUG = os.getenv("LLMASSISTANT_DEBUG", "0").lower() in ("1", "true", "yes")
 ENABLE_QUERY_REWRITE = os.getenv("LLMASSISTANT_QUERY_REWRITE", "1").lower() in ("1", "true", "yes")
 
-GEN_TEMPERATURE = float(os.getenv("LLMASSISTANT_TEMPERATURE", "0.1"))
-GEN_TOP_P = float(os.getenv("LLMASSISTANT_TOP_P", "0.9"))
+GEN_TEMPERATURE = float(os.getenv("LLMASSISTANT_TEMPERATURE", "0.0"))
+GEN_TOP_P = float(os.getenv("LLMASSISTANT_TOP_P", "1.0"))
 GEN_NUM_CTX = int(os.getenv("LLMASSISTANT_NUM_CTX", "2048"))
 
-# Context compression (recommended ON)
+# Context compression
 COMPRESS_CONTEXT = os.getenv("LLMASSISTANT_COMPRESS_CONTEXT", "1").lower() in ("1", "true", "yes")
-MAX_LINES_PER_CHUNK = int(os.getenv("LLMASSISTANT_MAX_LINES_PER_CHUNK", "10"))
+MAX_LINES_PER_CHUNK = int(os.getenv("LLMASSISTANT_MAX_LINES_PER_CHUNK", "20"))
 
 STOPWORDS = {
     "the","a","an","and","or","of","to","in","on","for","with","is","are","was","were",
@@ -65,14 +65,18 @@ STOPWORDS = {
 }
 
 SYNONYMS = {
-    # generic academic/admin synonyms (global)
+    # generic academic/admin synonyms
     "teachers": ["lecturer", "instructor", "professor", "faculty", "email", "contact"],
     "teacher": ["lecturer", "instructor", "professor", "email", "contact"],
     "lecturer": ["teacher", "instructor", "professor", "email", "contact"],
+    "instructor": ["teacher", "lecturer", "professor", "email", "contact"],
+    "professor": ["teacher", "lecturer", "instructor", "email", "contact"],
+    "email": ["contact", "lecturer", "instructor", "teacher"],
     "deadline": ["due", "submission", "submit", "date"],
     "exam": ["test", "assessment", "evaluation"],
     "grade": ["grading", "assessment", "evaluation", "criteria"],
     "thesis": ["dissertation", "proposal", "supervisor", "steps", "procedure"],
+    "contact": ["email", "lecturer", "teacher", "instructor"],
 }
 
 EMAIL_RE = re.compile(r"[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}")
@@ -91,6 +95,7 @@ class Query(BaseModel):
     question: str
     courseid: int
     userid: int
+    history: list[dict] = Field(default_factory=list)
 
 
 # -----------------------------
@@ -112,19 +117,49 @@ def build_system_prompt(courseid: int) -> str:
     return "\n\n".join(parts).strip()
 
 
+def build_history_block(history: list[dict]) -> str:
+    """
+    Optional chat history block to resolve pronouns/follow-up questions.
+    Uses only the last few turns to keep prompt bounded.
+    """
+    if not history:
+        return ""
+
+    lines = []
+    for turn in history[-6:]:
+        role = (turn.get("role") or "user").strip().upper()
+        msg = (turn.get("message") or "").strip()
+        if msg:
+            lines.append(f"{role}: {msg}")
+
+    if not lines:
+        return ""
+
+    return "CHAT HISTORY:\n" + "\n".join(lines) + "\n\n"
+
+
 def ollama_generate(prompt: str) -> str:
     payload = {
         "model": LLM_MODEL,
         "prompt": prompt,
         "stream": False,
-        "options": {"temperature": GEN_TEMPERATURE, "top_p": GEN_TOP_P, "num_ctx": GEN_NUM_CTX}
+        "options": {
+            "temperature": GEN_TEMPERATURE,
+            "top_p": GEN_TOP_P,
+            "num_ctx": GEN_NUM_CTX
+        }
     }
     headers = {"Connection": "close"}
     last_err = None
 
     for attempt in range(4):
         try:
-            r = _session.post(OLLAMA_GEN_URL, json=payload, headers=headers, timeout=(5, 120))
+            r = _session.post(
+                OLLAMA_GEN_URL,
+                json=payload,
+                headers=headers,
+                timeout=(5, 120)
+            )
             r.raise_for_status()
             data = r.json()
             response = (data.get("response") or "").strip()
@@ -167,7 +202,6 @@ def ollama_rewrite_query(q: str) -> str:
 
 def tokenize(text: str):
     text = (text or "").lower()
-    # FIX: correct regex (no escaped brackets)
     return set(re.findall(r"[a-zA-ZÀ-ÿ0-9]+", text))
 
 
@@ -181,7 +215,6 @@ def build_keyword_query(q: str) -> str:
         for syn in SYNONYMS.get(t, []):
             expanded.append(syn)
 
-    # dedupe preserving order
     out = list(dict.fromkeys(expanded))
     return " ".join(out[:18]).strip()
 
@@ -247,7 +280,6 @@ def compress_doc(doc: str, query_text: str) -> str:
                     if lj:
                         keep.append(lj)
 
-    # dedupe preserving order
     out = []
     seen = set()
     for l in keep:
@@ -260,7 +292,7 @@ def compress_doc(doc: str, query_text: str) -> str:
     return "\n".join(out) if out else (doc or "")
 
 
-def limit_per_source(items, max_per_source=2):
+def limit_per_source(items, max_per_source=3):
     counts = {}
     out = []
     for doc, meta, dist, score in items:
@@ -279,9 +311,16 @@ def pack_context(ranked_items, query_text: str):
     for doc, meta, dist, score in ranked_items:
         src = (meta or {}).get("source", "unknown.pdf")
         d2 = compress_doc(doc, query_text)
-        block = f"[SOURCE: {src}]\n{d2}\n"
+
+        # avoid duplicating SOURCE prefix if already present in doc text
+        if d2.lstrip().startswith("[SOURCE:"):
+            block = f"{d2}\n"
+        else:
+            block = f"[SOURCE: {src}]\n{d2}\n"
+
         if total + len(block) > MAX_CONTEXT_CHARS:
             break
+
         context.append(block)
         used_sources.append(src)
         total += len(block)
@@ -388,12 +427,12 @@ def ask(data: Query):
             }
         return resp
 
-    # Reduce redundant chunks from same source
-    candidates = limit_per_source(candidates, max_per_source=2)
-
+    candidates = limit_per_source(candidates, max_per_source=3)
     top = candidates[:MAX_CHUNKS]
     context, used_sources = pack_context(top, q_mix)
     sources = used_sources
+
+    history_block = build_history_block(data.history)
 
     system_prompt = build_system_prompt(data.courseid)
     if not system_prompt:
@@ -406,7 +445,7 @@ def ask(data: Query):
 
     prompt = f"""{system_prompt}
 
-CONTEXT:
+{history_block}CONTEXT:
 {context}
 
 QUESTION:
@@ -432,6 +471,6 @@ ANSWER:
             "queries": queries,
             "best_dist": best_dist,
             "top_sources": sources,
-            "context_preview": context[:800]  # first 800 chars only
+            "context_preview": context[:800]
         }
     return resp

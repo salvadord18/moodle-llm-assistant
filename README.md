@@ -333,3 +333,8 @@ export LLMASSISTANT_DISTANCE_THRESHOLD=0.96
 export LLMASSISTANT_TOP_K=20
 export LLMASSISTANT_MAX_CHUNKS=10
 uvicorn rag_api:app --host 0.0.0.0 --port 8001
+
+
+pkill -f "uvicorn rag_api:app" || true
+export LLMASSISTANT_DEBUG=1
+uvicorn rag_api:app --host 0.0.0.0 --port 8001
