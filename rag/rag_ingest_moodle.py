@@ -55,8 +55,16 @@ MODULE_CONTEXTLEVEL = 70
 # HELPERS
 # -----------------------------
 def normalize(text: str) -> str:
-    text = re.sub(r"\s+", " ", text)
-    return text.strip()
+    """
+    Preserve line structure so downstream context compression can keep
+    labels like 'Lecturer:', 'Email:', 'Assessment:', etc.
+    """
+    lines = []
+    for line in text.splitlines():
+        line = re.sub(r"[ \t]+", " ", line).strip()
+        if line:
+            lines.append(line)
+    return "\n".join(lines)
 
 
 def chunk_text(text: str, size=CHUNK_SIZE, overlap=CHUNK_OVERLAP):

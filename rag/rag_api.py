@@ -37,9 +37,9 @@ SYSTEM_COURSE_FILE = "system_course.txt"
 SYSTEM_GLOBAL_FILE = "system_global.txt"
 STYLE_FILE = "style.txt"
 
-TOP_K = int(os.getenv("LLMASSISTANT_TOP_K", "20"))
+TOP_K = int(os.getenv("LLMASSISTANT_TOP_K", "10"))
 DISTANCE_THRESHOLD = float(os.getenv("LLMASSISTANT_DISTANCE_THRESHOLD", "0.96"))
-MAX_CHUNKS = int(os.getenv("LLMASSISTANT_MAX_CHUNKS", "10"))
+MAX_CHUNKS = int(os.getenv("LLMASSISTANT_MAX_CHUNKS", "5"))
 MAX_CONTEXT_CHARS = int(os.getenv("LLMASSISTANT_MAX_CONTEXT_CHARS", "8000"))
 
 ALPHA_VEC = float(os.getenv("LLMASSISTANT_RERANK_ALPHA", "0.55"))  # vector
@@ -54,7 +54,7 @@ GEN_NUM_CTX = int(os.getenv("LLMASSISTANT_NUM_CTX", "2048"))
 
 # Context compression
 COMPRESS_CONTEXT = os.getenv("LLMASSISTANT_COMPRESS_CONTEXT", "1").lower() in ("1", "true", "yes")
-MAX_LINES_PER_CHUNK = int(os.getenv("LLMASSISTANT_MAX_LINES_PER_CHUNK", "20"))
+MAX_LINES_PER_CHUNK = int(os.getenv("LLMASSISTANT_MAX_LINES_PER_CHUNK", "30"))
 
 STOPWORDS = {
     "the","a","an","and","or","of","to","in","on","for","with","is","are","was","were",
@@ -146,7 +146,9 @@ def ollama_generate(prompt: str) -> str:
         "options": {
             "temperature": GEN_TEMPERATURE,
             "top_p": GEN_TOP_P,
-            "num_ctx": GEN_NUM_CTX
+            "num_ctx": GEN_NUM_CTX,
+            "repeat_penalty": 1.0,
+            "top_k": 40
         }
     }
     headers = {"Connection": "close"}
@@ -265,6 +267,14 @@ def compress_doc(doc: str, query_text: str) -> str:
         if not line_stripped:
             continue
 
+        # Skip useless headers (very common in slides)
+        if re.match(r"^(lecture|chapter|slide|instituto|universidade)", line_stripped.lower()):
+            continue
+
+        # Skip short useless lines
+        if len(line_stripped) < 40 and ":" not in line_stripped:
+            continue
+
         email_like = bool(EMAIL_RE.search(line_stripped))
         structured = (":" in line_stripped and len(line_stripped) <= 120)
 
@@ -292,7 +302,7 @@ def compress_doc(doc: str, query_text: str) -> str:
     return "\n".join(out) if out else (doc or "")
 
 
-def limit_per_source(items, max_per_source=3):
+def limit_per_source(items, max_per_source=5):
     counts = {}
     out = []
     for doc, meta, dist, score in items:
@@ -327,6 +337,21 @@ def pack_context(ranked_items, query_text: str):
 
     used_sources = list(dict.fromkeys(used_sources))
     return "\n".join(context), used_sources
+
+
+def detect_question_type(q: str) -> str:
+    ql = q.lower()
+
+    if any(w in ql for w in ["who", "teacher", "lecturer", "professor", "instructor", "contact", "email"]):
+        return "contacts"
+
+    if any(w in ql for w in ["deadline", "due", "submission", "date"]):
+        return "deadlines"
+
+    if any(w in ql for w in ["rule", "requirement", "criteria", "policy"]):
+        return "rules"
+
+    return "general"
 
 
 # -----------------------------
@@ -427,7 +452,7 @@ def ask(data: Query):
             }
         return resp
 
-    candidates = limit_per_source(candidates, max_per_source=3)
+    candidates = limit_per_source(candidates, max_per_source=5)
     top = candidates[:MAX_CHUNKS]
     context, used_sources = pack_context(top, q_mix)
     sources = used_sources
@@ -443,16 +468,104 @@ def ask(data: Query):
             "\"The provided PDFs do not contain this information.\""
         )
 
-    prompt = f"""{system_prompt}
+    q_type = detect_question_type(q)
 
-{history_block}CONTEXT:
-{context}
+    if q_type == "contacts":
+        prompt = f"""{system_prompt}
 
-QUESTION:
-{q}
+    CONTEXT:
+    {context}
 
-ANSWER:
-"""
+    QUESTION:
+    {q}
+
+    You MUST extract ALL people and their contacts from the CONTEXT.
+
+    Rules:
+    - List ALL lecturers, instructors, professors found.
+    - Include their emails if present.
+    - Use ONLY the text from CONTEXT.
+    - DO NOT explain.
+    - DO NOT infer.
+    - DO NOT skip names.
+
+    Format:
+    - Name
+    Email: xxx
+
+    If none found, reply exactly:
+    "The provided PDFs do not contain this information."
+
+    FINAL ANSWER:
+    """
+
+    elif q_type == "deadlines":
+        prompt = f"""{system_prompt}
+
+    CONTEXT:
+    {context}
+
+    QUESTION:
+    {q}
+
+    Extract ALL deadlines, dates, or submission information.
+
+    Rules:
+    - Include ALL relevant dates.
+    - Include what each date refers to.
+    - DO NOT explain.
+
+    Format:
+    - Item: date
+
+    If none found, reply exactly:
+    "The provided PDFs do not contain this information."
+
+    FINAL ANSWER:
+    """
+
+    elif q_type == "rules":
+        prompt = f"""{system_prompt}
+
+    CONTEXT:
+    {context}
+
+    QUESTION:
+    {q}
+
+    Extract ALL rules, requirements, or criteria.
+
+    Rules:
+    - List all relevant points.
+    - Keep them short.
+    - DO NOT explain.
+
+    If none found, reply exactly:
+    "The provided PDFs do not contain this information."
+
+    FINAL ANSWER:
+    """
+
+    else:
+        prompt = f"""{system_prompt}
+
+    {history_block}CONTEXT:
+    {context}
+
+    QUESTION:
+    {q}
+
+    You MUST follow these rules strictly:
+    - Answer ONLY using the CONTEXT.
+    - Extract the answer directly.
+    - Do NOT explain unnecessarily.
+    - Do NOT invent information.
+
+    If the answer is not found, reply exactly:
+    "The provided PDFs do not contain this information."
+
+    FINAL ANSWER:
+    """
 
     try:
         answer = ollama_generate(prompt).strip()

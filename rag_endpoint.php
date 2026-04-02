@@ -20,13 +20,36 @@ try {
 
     $question = required_param('question', PARAM_TEXT);
     $courseid = required_param('courseid', PARAM_INT);
+    $userid = $USER->id;
 
     $apiurl = 'http://127.0.0.1:8001/ask';
+
+    /**
+     * Load recent conversation history so the Python backend
+     * can resolve follow-up questions like "his email", "that deadline", etc.
+     *
+     * history_endpoint.php already shows that history_manager::load_history($userid, $courseid)
+     * exists and returns role/message/timecreated records. [1](https://liveeduisegiunl-my.sharepoint.com/personal/20240597_novaims_unl_pt/Documents/Microsoft%20Copilot%20Chat%20Files/rag_endpoint.php)
+     */
+    $historyrows = \block_llmassistant\local\history_manager::load_history($userid, $courseid);
+
+    // Keep only the last few turns to avoid making the payload too large.
+    $historyrows = array_slice($historyrows, -6);
+
+    $history = [];
+    foreach ($historyrows as $row) {
+        $history[] = [
+            'role' => $row->role ?? 'user',
+            'message' => $row->message ?? '',
+        ];
+    }
+
     $payload = json_encode([
         'question' => $question,
         'courseid' => $courseid,
-        'userid'   => $USER->id,
-    ]);
+        'userid'   => $userid,
+        'history'  => $history,
+    ], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
 
     $ch = curl_init($apiurl);
     curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
@@ -92,18 +115,25 @@ try {
 
     $sources = $data['sources'] ?? [];
 
-    // Persist history server-side.
-    \block_llmassistant\local\history_manager::save_message($USER->id, $courseid, 'user', $question);
-    \block_llmassistant\local\history_manager::save_message($USER->id, $courseid, 'assistant', $answer);
+    // Persist the new user turn + assistant turn.
+    \block_llmassistant\local\history_manager::save_message($userid, $courseid, 'user', $question);
+    \block_llmassistant\local\history_manager::save_message($userid, $courseid, 'assistant', $answer);
 
     if (ob_get_length()) {
         ob_clean();
     }
 
-    echo json_encode([
+    $out = [
         'answer'  => $answer,
         'sources' => $sources,
-    ], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+    ];
+
+    // During development, forward backend debug info if present.
+    if (!empty($data['debug'])) {
+        $out['debug'] = $data['debug'];
+    }
+
+    echo json_encode($out, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
     exit;
 
 } catch (Throwable $e) {

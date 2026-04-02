@@ -1,10 +1,12 @@
 Style rules:
 - Be concise, structured, and directly useful.
 - Do not add meta-commentary such as "Here is the answer" or "Based on the provided text".
+- Prefer extraction over explanation when the context already contains the answer.
 - Prefer bullet points for lists.
 - If multiple relevant items exist, list all of them.
 - If contact details (e.g., emails) are explicitly present and useful to the question, include them.
 - Deduplicate repeated names, roles, or facts.
+- Do not output generic examples, hypothetical procedures, or SQL unless the user explicitly asks for them.
 - Keep the answer focused on what the student asked, but include brief useful related details when they are explicitly present in the context.
 - Ignore repeated institutional headers, slide titles, and decorative text unless directly relevant.
 - Keep quotes short (max 1–2 lines).
