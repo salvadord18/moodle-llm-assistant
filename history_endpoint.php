@@ -10,47 +10,49 @@
 define('AJAX_SCRIPT', true);
 
 require_once(__DIR__ . '/../../config.php');
-require_once($CFG->dirroot . '/blocks/llmassistant/classes/local/history_manager.php');
+
+@ini_set('display_errors', '0');
+header('Content-Type: application/json; charset=utf-8');
 
 require_login();
+require_sesskey();
 
 $action = required_param('action', PARAM_ALPHA);
 $courseid = required_param('courseid', PARAM_INT);
-
-header('Content-Type: application/json');
-
 $userid = $USER->id;
 
-switch ($action) {
-    case 'load':
-        // Se quiseres máxima segurança, descomenta a linha seguinte
-        // require_sesskey();
+try {
 
-        $rows = \block_llmassistant\local\history_manager::get_history($userid, $courseid, 200);
+    if ($action === 'load') {
+        $messages = \block_llmassistant\local\history_manager::load_history($userid, $courseid);
 
-        $out = [];
-        foreach ($rows as $r) {
-            $out[] = [
-                'role' => $r->role,
-                'message' => $r->message,
-                'timecreated' => $r->timecreated,
+        $result = [];
+        foreach ($messages as $m) {
+            $result[] = [
+                'role' => $m->role,
+                'message' => $m->message,
+                'timecreated' => $m->timecreated,
             ];
         }
 
-        echo json_encode(['messages' => $out]);
-        break;
+        echo json_encode(['messages' => $result]);
+        exit;
+    }
 
-    case 'clear':
-        require_sesskey();
-
+    if ($action === 'clear') {
         \block_llmassistant\local\history_manager::clear_history($userid, $courseid);
-        echo json_encode(['ok' => true]);
-        break;
 
-    default:
-        http_response_code(400);
-        echo json_encode(['error' => 'Invalid action']);
-        break;
+        echo json_encode(['success' => true]);
+        exit;
+    }
+
+    echo json_encode(['error' => 'Invalid action']);
+    exit;
+
+} catch (Throwable $e) {
+    echo json_encode([
+        'error' => 'Server error',
+        'debug' => $e->getMessage()
+    ]);
+    exit;
 }
-
-exit;

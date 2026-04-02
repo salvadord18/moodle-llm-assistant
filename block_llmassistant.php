@@ -271,8 +271,8 @@ class block_llmassistant extends block_base {
       });
 
       const raw = await res.text();
+      console.log("RAW rag_endpoint.php response:", raw);
       let data = {};
-
       try {
           data = JSON.parse(raw);
       } catch (e) {
@@ -283,26 +283,24 @@ class block_llmassistant extends block_base {
           };
       }
 
-      if (data.debug) {
-          console.warn("LLM debug:", data.debug);
-      }
+    if (data.debug) {
+        console.warn("LLM debug:", data.debug);
+    }
 
-      thinkingEl.remove();
+    thinkingEl.remove();
 
-      const answer =
-          (typeof data.answer === "string" && data.answer.trim() !== "")
-              ? data.answer.trim()
-              : "Error: empty or invalid assistant response.";
+    const answer =
+        (typeof data.answer === "string" && data.answer.trim() !== "")
+            ? data.answer.trim()
+            : "Error: empty or invalid assistant response.";
 
-      addMessage(answer, "bot");
+    addMessage(answer, "bot");
 
-      if (
-          Array.isArray(data.sources) &&
-          data.sources.length &&
-          answer !== "The provided PDFs do not contain this information."
-      ) {
-          addSources(data.sources);
-      }
+    if (Array.isArray(data.sources)) {
+      addSources(data.sources);
+    }
+
+    await loadHistory();
 
       // History is managed server-side via history_endpoint.php.
       // Message persistence depends on rag_endpoint.php implementation.

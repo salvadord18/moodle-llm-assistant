@@ -36,7 +36,7 @@ TOP_K = int(os.getenv("LLMASSISTANT_TOP_K", "5"))
 
 # Cosine distance threshold: smaller is better. Tune as needed.
 # If min distance is higher than this, we treat it as "no relevant context".
-DISTANCE_THRESHOLD = float(os.getenv("LLMASSISTANT_DISTANCE_THRESHOLD", "0.85"))
+DISTANCE_THRESHOLD = float(os.getenv("LLMASSISTANT_DISTANCE_THRESHOLD", "1.0"))
 
 client = PersistentClient(path=CHROMA_DB_PATH)
 app = FastAPI()
@@ -180,13 +180,32 @@ ANSWER:
 
     try:
         answer = ollama_generate(prompt)
-        if not answer.strip():
+    except Exception as e:
             return {
-                "answer": "Error: the model returned an empty response.",
+                "answer": "Error: LLM generation failed.",
+                "sources": sources,
+                "debug": str(e)
+            }
+
+    if not isinstance(answer, str):
+            return {
+                "answer": "Error: invalid response type from model.",
                 "sources": sources
             }
-    except Exception:
-        # Always return JSON; never break the UI
-        return {"answer": "Error: assistant backend temporarily unavailable. Please try again.", "sources": sources}
 
-    return {"answer": answer, "sources": sources}
+    answer = answer.strip()
+
+    if not answer:
+            return {
+                "answer": "Error: empty response from model.",
+                "sources": sources
+            }
+
+    def clean_text(text: str) -> str:
+        return text.replace("\x00", "").strip()
+    
+    print("FINAL ANSWER:", repr(answer))
+    return {
+        "answer": clean_text(answer),
+        "sources": sources
+    }
