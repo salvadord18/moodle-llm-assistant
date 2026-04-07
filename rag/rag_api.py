@@ -4,8 +4,8 @@ Moodle RAG API — Generic RAG (Improved Retrieval + Rerank + Context Compressio
 
 Pipeline:
 1) Retrieve top-K candidates from Chroma (multi-query: original + rewrite + keywords)
-2) Rerank with a hybrid score (vector distance + lexical overlap)
-3) Compress + pack best chunks into a bounded context
+2) Rerank with a hybrid score (vector distance + lexical overlap + source/label bonuses)
+3) Compress + pack best chunks into a bounded context (priority source + diversity-by-source)
 4) Generate with Ollama using system/style prompts
 
 Run:
@@ -32,15 +32,21 @@ OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://host.docker.internal:1143
 OLLAMA_GEN_URL = f"{OLLAMA_BASE_URL}/api/generate"
 LLM_MODEL = os.getenv("OLLAMA_LLM_MODEL", "llama3.2")
 
-PROMPTS_DIR = os.getenv("LLMASSISTANT_PROMPTS_DIR", "/var/www/html/blocks/llmassistant/rag/prompts")
+PROMPTS_DIR = os.getenv(
+    "LLMASSISTANT_PROMPTS_DIR",
+    "/var/www/html/blocks/llmassistant/rag/prompts"
+)
 SYSTEM_COURSE_FILE = "system_course.txt"
 SYSTEM_GLOBAL_FILE = "system_global.txt"
 STYLE_FILE = "style.txt"
 
-TOP_K = int(os.getenv("LLMASSISTANT_TOP_K", "10"))
+# Defaults tuned for "aggregation" questions (teachers/contacts/deadlines/rules)
+TOP_K = int(os.getenv("LLMASSISTANT_TOP_K", "30"))
+MAX_CHUNKS = int(os.getenv("LLMASSISTANT_MAX_CHUNKS", "12"))
+MAX_CONTEXT_CHARS = int(os.getenv("LLMASSISTANT_MAX_CONTEXT_CHARS", "14000"))
+MAX_LINES_PER_CHUNK = int(os.getenv("LLMASSISTANT_MAX_LINES_PER_CHUNK", "40"))
+
 DISTANCE_THRESHOLD = float(os.getenv("LLMASSISTANT_DISTANCE_THRESHOLD", "0.96"))
-MAX_CHUNKS = int(os.getenv("LLMASSISTANT_MAX_CHUNKS", "5"))
-MAX_CONTEXT_CHARS = int(os.getenv("LLMASSISTANT_MAX_CONTEXT_CHARS", "8000"))
 
 ALPHA_VEC = float(os.getenv("LLMASSISTANT_RERANK_ALPHA", "0.55"))  # vector
 BETA_LEX  = float(os.getenv("LLMASSISTANT_RERANK_BETA", "0.45"))   # lexical
@@ -52,9 +58,20 @@ GEN_TEMPERATURE = float(os.getenv("LLMASSISTANT_TEMPERATURE", "0.0"))
 GEN_TOP_P = float(os.getenv("LLMASSISTANT_TOP_P", "1.0"))
 GEN_NUM_CTX = int(os.getenv("LLMASSISTANT_NUM_CTX", "2048"))
 
-# Context compression
 COMPRESS_CONTEXT = os.getenv("LLMASSISTANT_COMPRESS_CONTEXT", "1").lower() in ("1", "true", "yes")
-MAX_LINES_PER_CHUNK = int(os.getenv("LLMASSISTANT_MAX_LINES_PER_CHUNK", "30"))
+
+# Priority sources (comma-separated). Default: Lecture1.pdf (course overview/intro).
+PRIORITY_SOURCES = [
+    s.strip() for s in os.getenv("LLMASSISTANT_PRIORITY_SOURCES", "Lecture1.pdf").split(",")
+    if s.strip()
+]
+SOURCE_BONUS = float(os.getenv("LLMASSISTANT_SOURCE_BONUS", "0.10"))
+MIN_PRIORITY_CHUNKS = int(os.getenv("LLMASSISTANT_MIN_PRIORITY_CHUNKS", "3"))
+
+# For contacts/admin questions: boost chunks with real teacher/contact labels, penalize example datasets
+CONTACT_LABEL_BONUS = float(os.getenv("LLMASSISTANT_CONTACT_LABEL_BONUS", "0.25"))
+EXAMPLE_PENALTY_EMAIL = float(os.getenv("LLMASSISTANT_EXAMPLE_EMAIL_PENALTY", "0.30"))
+EXAMPLE_PENALTY_TABLE = float(os.getenv("LLMASSISTANT_EXERCISE_TABLE_PENALTY", "0.20"))
 
 STOPWORDS = {
     "the","a","an","and","or","of","to","in","on","for","with","is","are","was","were",
@@ -65,7 +82,6 @@ STOPWORDS = {
 }
 
 SYNONYMS = {
-    # generic academic/admin synonyms
     "teachers": ["lecturer", "instructor", "professor", "faculty", "email", "contact"],
     "teacher": ["lecturer", "instructor", "professor", "email", "contact"],
     "lecturer": ["teacher", "instructor", "professor", "email", "contact"],
@@ -80,6 +96,15 @@ SYNONYMS = {
 }
 
 EMAIL_RE = re.compile(r"[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}")
+TEACHER_LABEL_RE = re.compile(r"\b(lecturer|instructor|professor)\b", re.IGNORECASE)
+NOV_AFFIL_EMAIL_RE = re.compile(r"@novaims\.unl\.pt\b", re.IGNORECASE)
+
+# Common “example dataset” signals in DB lectures (avoid false positives)
+EXAMPLE_EMAIL_RE = re.compile(r"\b(example\.com|mailinator\.com|fakemail\.com)\b", re.IGNORECASE)
+EXERCISE_TABLE_RE = re.compile(
+    r"\b(order_id|customer email|functional dependencies|shipping department|patients? appointment|bill|payment)\b",
+    re.IGNORECASE
+)
 
 # -----------------------------
 # INIT
@@ -118,24 +143,15 @@ def build_system_prompt(courseid: int) -> str:
 
 
 def build_history_block(history: list[dict]) -> str:
-    """
-    Optional chat history block to resolve pronouns/follow-up questions.
-    Uses only the last few turns to keep prompt bounded.
-    """
     if not history:
         return ""
-
     lines = []
     for turn in history[-6:]:
         role = (turn.get("role") or "user").strip().upper()
         msg = (turn.get("message") or "").strip()
         if msg:
             lines.append(f"{role}: {msg}")
-
-    if not lines:
-        return ""
-
-    return "CHAT HISTORY:\n" + "\n".join(lines) + "\n\n"
+    return ("CHAT HISTORY:\n" + "\n".join(lines) + "\n\n") if lines else ""
 
 
 def ollama_generate(prompt: str) -> str:
@@ -147,8 +163,6 @@ def ollama_generate(prompt: str) -> str:
             "temperature": GEN_TEMPERATURE,
             "top_p": GEN_TOP_P,
             "num_ctx": GEN_NUM_CTX,
-            "repeat_penalty": 1.0,
-            "top_k": 40
         }
     }
     headers = {"Connection": "close"}
@@ -156,12 +170,7 @@ def ollama_generate(prompt: str) -> str:
 
     for attempt in range(4):
         try:
-            r = _session.post(
-                OLLAMA_GEN_URL,
-                json=payload,
-                headers=headers,
-                timeout=(5, 120)
-            )
+            r = _session.post(OLLAMA_GEN_URL, json=payload, headers=headers, timeout=(5, 120))
             r.raise_for_status()
             data = r.json()
             response = (data.get("response") or "").strip()
@@ -176,10 +185,6 @@ def ollama_generate(prompt: str) -> str:
 
 
 def ollama_rewrite_query(q: str) -> str:
-    """
-    Generic query rewriting to improve retrieval.
-    Returns ONE line with synonyms and document-style labels.
-    """
     rewrite_prompt = (
         "Rewrite the user question into a search query for lecture PDFs. "
         "Add synonyms AND common document labels used in slides (e.g., Lecturer, Instructor, Professor, Email, Contact, Assessment, Deadline, Exam). "
@@ -210,13 +215,11 @@ def tokenize(text: str):
 def build_keyword_query(q: str) -> str:
     toks = [t for t in re.findall(r"[a-zA-ZÀ-ÿ0-9]+", (q or "").lower()) if t not in STOPWORDS]
     toks = toks[:10]
-
     expanded = []
     for t in toks:
         expanded.append(t)
         for syn in SYNONYMS.get(t, []):
             expanded.append(syn)
-
     out = list(dict.fromkeys(expanded))
     return " ".join(out[:18]).strip()
 
@@ -232,26 +235,12 @@ def lexical_overlap_score(query: str, doc: str) -> float:
     return len(inter) / max(1, len(qset))
 
 
-def unique_sources(metas):
-    sources = []
-    for m in metas:
-        if m and m.get("source"):
-            sources.append(m["source"])
-    return list(dict.fromkeys(sources))
-
-
 def doc_key(doc: str, meta: dict):
     src = (meta or {}).get("source", "")
-    h = hashlib.md5((src + "|" + (doc or "")).encode("utf-8", errors="ignore")).hexdigest()
-    return h
+    return hashlib.md5((src + "|" + (doc or "")).encode("utf-8", errors="ignore")).hexdigest()
 
 
 def compress_doc(doc: str, query_text: str) -> str:
-    """
-    Generic context compression:
-    - Keep lines that share tokens with the query (+ neighbors)
-    - Always keep email-like lines and short structured "Label: Value" lines
-    """
     if not COMPRESS_CONTEXT:
         return doc or ""
 
@@ -261,22 +250,13 @@ def compress_doc(doc: str, query_text: str) -> str:
         return doc or ""
 
     keep = []
-
     for i, line in enumerate(lines):
         line_stripped = line.strip()
         if not line_stripped:
             continue
 
-        # Skip useless headers (very common in slides)
-        if re.match(r"^(lecture|chapter|slide|instituto|universidade)", line_stripped.lower()):
-            continue
-
-        # Skip short useless lines
-        if len(line_stripped) < 40 and ":" not in line_stripped:
-            continue
-
         email_like = bool(EMAIL_RE.search(line_stripped))
-        structured = (":" in line_stripped and len(line_stripped) <= 120)
+        structured = (":" in line_stripped and len(line_stripped) <= 260)
 
         if email_like or structured:
             keep.append(line_stripped)
@@ -290,8 +270,7 @@ def compress_doc(doc: str, query_text: str) -> str:
                     if lj:
                         keep.append(lj)
 
-    out = []
-    seen = set()
+    out, seen = [], set()
     for l in keep:
         if l not in seen:
             out.append(l)
@@ -300,17 +279,6 @@ def compress_doc(doc: str, query_text: str) -> str:
             break
 
     return "\n".join(out) if out else (doc or "")
-
-
-def limit_per_source(items, max_per_source=5):
-    counts = {}
-    out = []
-    for doc, meta, dist, score in items:
-        src = (meta or {}).get("source", "unknown.pdf")
-        counts[src] = counts.get(src, 0) + 1
-        if counts[src] <= max_per_source:
-            out.append((doc, meta, dist, score))
-    return out
 
 
 def pack_context(ranked_items, query_text: str):
@@ -322,7 +290,6 @@ def pack_context(ranked_items, query_text: str):
         src = (meta or {}).get("source", "unknown.pdf")
         d2 = compress_doc(doc, query_text)
 
-        # avoid duplicating SOURCE prefix if already present in doc text
         if d2.lstrip().startswith("[SOURCE:"):
             block = f"{d2}\n"
         else:
@@ -339,19 +306,12 @@ def pack_context(ranked_items, query_text: str):
     return "\n".join(context), used_sources
 
 
-def detect_question_type(q: str) -> str:
-    ql = q.lower()
-
-    if any(w in ql for w in ["who", "teacher", "lecturer", "professor", "instructor", "contact", "email"]):
-        return "contacts"
-
-    if any(w in ql for w in ["deadline", "due", "submission", "date"]):
-        return "deadlines"
-
-    if any(w in ql for w in ["rule", "requirement", "criteria", "policy"]):
-        return "rules"
-
-    return "general"
+def is_contacts_or_admin(q: str) -> bool:
+    ql = (q or "").lower()
+    return any(k in ql for k in [
+        "who","teacher","teachers","lecturer","instructor","professor",
+        "email","contact","office","hours","grading","assessment","deadline","due","exam","policy","criteria","rule"
+    ])
 
 
 # -----------------------------
@@ -364,7 +324,6 @@ def ask(data: Query):
         return {"answer": "Please enter a question.", "sources": []}
 
     collection_name = "global_docs" if data.courseid == 0 else f"course_docs_{data.courseid}"
-
     try:
         collection = client.get_collection(collection_name, embedding_function=embedding_fn)
     except Exception as e:
@@ -401,6 +360,7 @@ def ask(data: Query):
     all_dists = results.get("distances") or []
 
     q_mix = " ".join([x for x in [q, q_kw, q2] if x]).strip()
+    want_contacts = is_contacts_or_admin(q)
 
     merged = {}
     seen_sources = []
@@ -419,6 +379,29 @@ def ask(data: Query):
             vec_sim = max(0.0, 1.0 - dist)
             score = ALPHA_VEC * vec_sim + BETA_LEX * lex
 
+            src = (meta or {}).get("source", "")
+            if src in PRIORITY_SOURCES:
+                score += SOURCE_BONUS
+
+            if want_contacts:
+                teacher_label = bool(TEACHER_LABEL_RE.search(doc))
+                has_email = bool(EMAIL_RE.search(doc))
+                has_nov_email = bool(NOV_AFFIL_EMAIL_RE.search(doc))
+
+                # positive signals for real teacher/contact chunks
+                if teacher_label and has_email:
+                    score += CONTACT_LABEL_BONUS * 1.8
+                elif teacher_label:
+                    score += CONTACT_LABEL_BONUS * 1.2
+                elif has_nov_email:
+                    score += CONTACT_LABEL_BONUS * 0.9
+
+                # negative signals for exercise datasets / fake emails
+                if EXAMPLE_EMAIL_RE.search(doc):
+                    score -= EXAMPLE_PENALTY_EMAIL
+                if EXERCISE_TABLE_RE.search(doc):
+                    score -= EXAMPLE_PENALTY_TABLE
+
             k = doc_key(doc, meta)
             cur = merged.get(k)
             if cur is None:
@@ -428,8 +411,8 @@ def ask(data: Query):
                 if (score > s0) or (score == s0 and dist < d0):
                     merged[k] = (doc, meta, dist, score)
 
-            if meta and meta.get("source"):
-                seen_sources.append(meta["source"])
+            if src:
+                seen_sources.append(src)
 
     candidates = list(merged.values())
     if not candidates:
@@ -452,138 +435,94 @@ def ask(data: Query):
             }
         return resp
 
-    candidates = limit_per_source(candidates, max_per_source=5)
-    top = candidates[:MAX_CHUNKS]
+    # -----------------------------
+    # Selection strategy:
+    # 1) For contacts/admin: ensure Lecture1 chunks that actually look like contacts/teacher info.
+    # 2) Fill with diversity-by-source (best 2 per source).
+    # -----------------------------
+    top = []
+    used = set()
+
+    # 1) Priority source selection
+    priority_candidates = [c for c in candidates if ((c[1] or {}).get("source", "") in PRIORITY_SOURCES)]
+    if priority_candidates:
+        if want_contacts:
+            def priority_rank(c):
+                doc = c[0] or ""
+                hits = 0
+                if TEACHER_LABEL_RE.search(doc): hits += 2
+                if NOV_AFFIL_EMAIL_RE.search(doc): hits += 2
+                if EMAIL_RE.search(doc): hits += 1
+                if EXAMPLE_EMAIL_RE.search(doc): hits -= 2
+                if EXERCISE_TABLE_RE.search(doc): hits -= 1
+                return (-hits, -c[3], c[2])
+            priority_candidates.sort(key=priority_rank)
+        else:
+            priority_candidates.sort(key=lambda x: (-x[3], x[2]))
+
+        for c in priority_candidates[:MIN_PRIORITY_CHUNKS]:
+            k = doc_key(c[0], c[1])
+            if k not in used:
+                top.append(c)
+                used.add(k)
+
+    # 2) Diversity-by-source fill (best 2 per source)
+    per_source = {}
+    for c in candidates:
+        doc, meta, dist, score = c
+        src = (meta or {}).get("source", "unknown.pdf")
+        per_source.setdefault(src, []).append(c)
+
+    for src in per_source:
+        per_source[src].sort(key=lambda x: (-x[3], x[2]))
+        per_source[src] = per_source[src][:2]
+
+    diverse = []
+    for items in per_source.values():
+        diverse.extend(items)
+    diverse.sort(key=lambda x: (-x[3], x[2]))
+
+    for c in diverse:
+        if len(top) >= MAX_CHUNKS:
+            break
+        k = doc_key(c[0], c[1])
+        if k not in used:
+            top.append(c)
+            used.add(k)
+
     context, used_sources = pack_context(top, q_mix)
-    sources = used_sources
-
     history_block = build_history_block(data.history)
-
     system_prompt = build_system_prompt(data.courseid)
-    if not system_prompt:
-        system_prompt = (
-            "You MUST answer using ONLY the provided CONTEXT.\n"
-            "Do NOT guess. Do NOT invent details.\n"
-            "If the answer is not explicitly present, reply exactly:\n"
-            "\"The provided PDFs do not contain this information.\""
-        )
 
-    q_type = detect_question_type(q)
+    prompt = f"""{system_prompt}
 
-    if q_type == "contacts":
-        prompt = f"""{system_prompt}
+{history_block}CONTEXT:
+{context}
 
-    CONTEXT:
-    {context}
+QUESTION:
+{q}
 
-    QUESTION:
-    {q}
-
-    You MUST extract ALL people and their contacts from the CONTEXT.
-
-    Rules:
-    - List ALL lecturers, instructors, professors found.
-    - Include their emails if present.
-    - Use ONLY the text from CONTEXT.
-    - DO NOT explain.
-    - DO NOT infer.
-    - DO NOT skip names.
-
-    Format:
-    - Name
-    Email: xxx
-
-    If none found, reply exactly:
-    "The provided PDFs do not contain this information."
-
-    FINAL ANSWER:
-    """
-
-    elif q_type == "deadlines":
-        prompt = f"""{system_prompt}
-
-    CONTEXT:
-    {context}
-
-    QUESTION:
-    {q}
-
-    Extract ALL deadlines, dates, or submission information.
-
-    Rules:
-    - Include ALL relevant dates.
-    - Include what each date refers to.
-    - DO NOT explain.
-
-    Format:
-    - Item: date
-
-    If none found, reply exactly:
-    "The provided PDFs do not contain this information."
-
-    FINAL ANSWER:
-    """
-
-    elif q_type == "rules":
-        prompt = f"""{system_prompt}
-
-    CONTEXT:
-    {context}
-
-    QUESTION:
-    {q}
-
-    Extract ALL rules, requirements, or criteria.
-
-    Rules:
-    - List all relevant points.
-    - Keep them short.
-    - DO NOT explain.
-
-    If none found, reply exactly:
-    "The provided PDFs do not contain this information."
-
-    FINAL ANSWER:
-    """
-
-    else:
-        prompt = f"""{system_prompt}
-
-    {history_block}CONTEXT:
-    {context}
-
-    QUESTION:
-    {q}
-
-    You MUST follow these rules strictly:
-    - Answer ONLY using the CONTEXT.
-    - Extract the answer directly.
-    - Do NOT explain unnecessarily.
-    - Do NOT invent information.
-
-    If the answer is not found, reply exactly:
-    "The provided PDFs do not contain this information."
-
-    FINAL ANSWER:
-    """
+ANSWER:
+"""
 
     try:
         answer = ollama_generate(prompt).strip()
     except Exception as e:
-        resp = {"answer": "Error: LLM generation failed.", "sources": sources}
+        resp = {"answer": "Error: LLM generation failed.", "sources": used_sources}
         if DEBUG:
             resp["debug"] = str(e)
         return resp
 
     if not answer:
-        return {"answer": "Error: empty response from model.", "sources": sources}
+        return {"answer": "Error: empty response from model.", "sources": used_sources}
 
-    resp = {"answer": answer, "sources": sources}
+    resp = {"answer": answer, "sources": used_sources}
     if DEBUG:
         resp["debug"] = {
             "queries": queries,
             "best_dist": best_dist,
-            "top_sources": sources,
+            "priority_sources": PRIORITY_SOURCES,
+            "top_sources": used_sources,
             "context_preview": context[:800]
         }
     return resp
