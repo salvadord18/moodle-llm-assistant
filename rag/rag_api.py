@@ -30,7 +30,7 @@ CHROMA_DB_PATH = "/var/www/moodledata/chroma_db"
 
 OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://host.docker.internal:11434")
 OLLAMA_GEN_URL = f"{OLLAMA_BASE_URL}/api/generate"
-LLM_MODEL = os.getenv("OLLAMA_LLM_MODEL", "llama3.2")
+LLM_MODEL = os.getenv("OLLAMA_LLM_MODEL", "qwen2.5:1.5b")
 
 PROMPTS_DIR = os.getenv(
     "LLMASSISTANT_PROMPTS_DIR",
@@ -508,13 +508,13 @@ ANSWER:
     try:
         answer = ollama_generate(prompt).strip()
     except Exception as e:
-        resp = {"answer": "Error: LLM generation failed.", "sources": used_sources}
+        resp = {"answer": "Error: LLM generation failed."}
         if DEBUG:
             resp["debug"] = str(e)
         return resp
 
     if not answer:
-        return {"answer": "Error: empty response from model.", "sources": used_sources}
+        return {"answer": "Error: empty response from model."}
 
     resp = {"answer": answer, "sources": used_sources}
     if DEBUG:

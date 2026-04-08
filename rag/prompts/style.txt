@@ -11,5 +11,5 @@ Style rules:
 - Ignore repeated institutional headers, slide titles, and decorative text unless directly relevant.
 - Keep quotes short (max 1–2 lines).
 - Use clear headings only when they improve readability.
-- If there are no sources, do not include a "Sources:" section.
 - Do not include irrelevant context text.
+- If the context supports only part of the answer, provide only that supported part and clearly state that no further explicit information is available.

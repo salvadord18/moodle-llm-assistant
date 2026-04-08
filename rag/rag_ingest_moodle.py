@@ -1,21 +1,29 @@
 """
-Moodle RAG Ingestion — Per-course collections for one or all Moodle courses
--------------------------------------------------------------------------
+Moodle RAG Ingestion — Generic, course-aware ingestion for Moodle PDFs
+---------------------------------------------------------------------
 
-Features:
-- Uses Chroma local embeddings (DefaultEmbeddingFunction)
-- Stores documents + metadatas only (no manual embeddings)
-- Creates one collection per course: course_docs_<courseid>
-- If TARGET_COURSE_ID is set (>0), ingests only that course
-- If TARGET_COURSE_ID is not set or is 0, ingests ALL courses with PDFs
-- Looks for PDFs in BOTH:
-    - course context (contextlevel = 50)
-    - module/activity context (contextlevel = 70)
-- Supports RESET_COLLECTION=true to rebuild collections cleanly
+What this version improves:
+- No assumptions about PDF file names (e.g. no Lecture1.pdf bias)
+- Per-course Chroma collections: course_docs_<courseid>
+- Extracts PDFs from course context (50) and module context (70)
+- Indexes page-aware chunks with rich metadata:
+    * source
+    * page
+    * chunk_index
+    * courseid
+    * contextlevel
+    * section_type
+    * title_hint
+    * contenthash
+- Chunking is page-first and structure-aware instead of only fixed-size slicing
+- Can ingest one course or all courses
+- Can rebuild collections cleanly with RESET_COLLECTION=true
 """
 
 import os
 import re
+from typing import Dict, Iterable, List, Tuple
+
 import fitz
 import psycopg2
 from chromadb import PersistentClient
@@ -24,16 +32,10 @@ from chromadb.utils.embedding_functions import DefaultEmbeddingFunction
 # -----------------------------
 # CONFIG
 # -----------------------------
-MOODLEDATA_PATH = "/var/www/moodledata/filedir"
-CHROMA_DB_PATH = "/var/www/moodledata/chroma_db"
-
-# If 0 or missing => ingest all courses
+MOODLEDATA_PATH = os.getenv("MOODLEDATA_PATH", "/var/www/moodledata/filedir")
+CHROMA_DB_PATH = os.getenv("CHROMA_DB_PATH", "/var/www/moodledata/chroma_db")
 TARGET_COURSE_ID = int(os.getenv("TARGET_COURSE_ID", "0"))
-
-# If true => delete existing collection(s) before re-ingesting
 RESET_COLLECTION = os.getenv("RESET_COLLECTION", "false").lower() == "true"
-
-# Moodle DB prefix
 DB_PREFIX = os.getenv("MOODLE_DB_PREFIX", "m_")
 
 DB = {
@@ -44,56 +46,119 @@ DB = {
     "password": os.getenv("MOODLE_DB_PASSWORD", "CHANGE_ME"),
 }
 
-CHUNK_SIZE = 1000
-CHUNK_OVERLAP = 175
-
-# Moodle context levels
 COURSE_CONTEXTLEVEL = 50
 MODULE_CONTEXTLEVEL = 70
+MAX_BLOCK_CHARS = int(os.getenv("RAG_MAX_BLOCK_CHARS", "1200"))
+BLOCK_OVERLAP = int(os.getenv("RAG_BLOCK_OVERLAP", "160"))
+MIN_TEXT_CHARS = int(os.getenv("RAG_MIN_TEXT_CHARS", "30"))
+
+# -----------------------------
+# REGEX / LABELS
+# -----------------------------
+CONTACT_RE = re.compile(r"\b(lecturer|instructor|professor|teacher|faculty|contact|email|office hours?)\b", re.I)
+ASSESSMENT_RE = re.compile(r"\b(assessment|exam|grade|grading|evaluation|criteria|policy|deadline|submission|deliverable)\b", re.I)
+SCHEDULE_RE = re.compile(r"\b(schedule|calendar|week\s*\d+|session|timeline|plan|agenda|date)\b", re.I)
+EXAMPLE_RE = re.compile(r"\b(example|exercise|case study|dataset|sample|patients?|orders?|appointments?|payment)\b", re.I)
 
 # -----------------------------
 # HELPERS
 # -----------------------------
 def normalize(text: str) -> str:
-    """
-    Preserve line structure so downstream context compression can keep
-    labels like 'Lecturer:', 'Email:', 'Assessment:', etc.
-    """
-    lines = []
-    for line in text.splitlines():
-        line = re.sub(r"[ \t]+", " ", line).strip()
+    """Preserve line structure but normalize whitespace."""
+    cleaned = []
+    for raw_line in (text or "").splitlines():
+        line = re.sub(r"[ \t]+", " ", raw_line).strip()
         if line:
-            lines.append(line)
-    return "\n".join(lines)
+            cleaned.append(line)
+    return "\n".join(cleaned)
 
 
-def chunk_text(text: str, size=CHUNK_SIZE, overlap=CHUNK_OVERLAP):
-    chunks = []
-    start = 0
-    while start < len(text):
-        end = start + size
-        chunks.append(text[start:end])
-        start = end - overlap
-        if start < 0:
-            start = 0
-        if start >= len(text):
-            break
-    return chunks
+def infer_section_type(text: str) -> str:
+    tl = (text or "").lower()
+    if CONTACT_RE.search(tl):
+        return "contact"
+    if ASSESSMENT_RE.search(tl):
+        return "assessment"
+    if SCHEDULE_RE.search(tl):
+        return "schedule"
+    if EXAMPLE_RE.search(tl):
+        return "example"
+    return "concept"
+
+
+def looks_like_heading(line: str) -> bool:
+    if not line:
+        return False
+    if len(line) > 120:
+        return False
+    if line.endswith(":"):
+        return True
+    words = line.split()
+    if 1 <= len(words) <= 12 and sum(w[:1].isupper() for w in words) >= max(1, len(words) // 2):
+        return True
+    if line.isupper() and len(line) <= 80:
+        return True
+    return False
+
+
+def split_into_structured_blocks(page_text: str, max_chars: int = MAX_BLOCK_CHARS, overlap: int = BLOCK_OVERLAP) -> List[str]:
+    """
+    Page-first chunking:
+    1) preserve headings and short labeled sections,
+    2) then split oversized blocks with overlap,
+    3) ignore extremely small/noisy chunks.
+    """
+    text = normalize(page_text)
+    if not text:
+        return []
+
+    lines = text.splitlines()
+    blocks: List[str] = []
+    current: List[str] = []
+
+    for line in lines:
+        if looks_like_heading(line) and current:
+            blocks.append("\n".join(current).strip())
+            current = [line]
+        else:
+            current.append(line)
+    if current:
+        blocks.append("\n".join(current).strip())
+
+    final_blocks: List[str] = []
+    for block in blocks:
+        if len(block) <= max_chars:
+            if len(block) >= MIN_TEXT_CHARS:
+                final_blocks.append(block)
+            continue
+
+        start = 0
+        while start < len(block):
+            end = min(len(block), start + max_chars)
+            piece = block[start:end].strip()
+            if len(piece) >= MIN_TEXT_CHARS:
+                final_blocks.append(piece)
+            if end >= len(block):
+                break
+            start = max(0, end - overlap)
+
+    return final_blocks
+
+
+def page_title_hint(page_text: str) -> str:
+    for line in normalize(page_text).splitlines()[:6]:
+        if 3 <= len(line) <= 120:
+            return line
+    return ""
 
 
 def db_connect():
     return psycopg2.connect(**DB)
 
 
-def get_all_course_ids_with_pdfs():
-    """
-    Return all course IDs that have at least one PDF either:
-    - directly in course context
-    - in a module/activity that belongs to the course
-    """
+def get_all_course_ids_with_pdfs() -> List[int]:
     conn = db_connect()
     cur = conn.cursor()
-
     sql = f"""
         SELECT DISTINCT
             CASE
@@ -108,13 +173,13 @@ def get_all_course_ids_with_pdfs():
          AND c.instanceid = cm.id
         WHERE f.filename LIKE '%%.pdf'
           AND f.filesize > 0
+          AND f.contenthash IS NOT NULL
           AND (
                 c.contextlevel = %s
                 OR (c.contextlevel = %s AND cm.course IS NOT NULL)
               )
         ORDER BY courseid
     """
-
     cur.execute(sql, (
         COURSE_CONTEXTLEVEL,
         MODULE_CONTEXTLEVEL,
@@ -122,25 +187,18 @@ def get_all_course_ids_with_pdfs():
         COURSE_CONTEXTLEVEL,
         MODULE_CONTEXTLEVEL,
     ))
-
     rows = cur.fetchall()
     cur.close()
     conn.close()
-
     return [r[0] for r in rows if r[0] is not None]
 
 
-def get_course_pdfs(courseid: int):
-    """
-    Return (contenthash, filename) for PDFs belonging to a course, either via:
-    - course context
-    - module context mapped through course_modules.course
-    """
+def get_course_pdfs(courseid: int) -> List[Tuple[str, str, int]]:
+    """Return (contenthash, filename, contextlevel) for all PDFs in a course."""
     conn = db_connect()
     cur = conn.cursor()
-
     sql = f"""
-        SELECT DISTINCT f.contenthash, f.filename
+        SELECT DISTINCT f.contenthash, f.filename, c.contextlevel
         FROM {DB_PREFIX}files f
         JOIN {DB_PREFIX}context c
           ON f.contextid = c.id
@@ -149,6 +207,7 @@ def get_course_pdfs(courseid: int):
          AND c.instanceid = cm.id
         WHERE f.filename LIKE '%%.pdf'
           AND f.filesize > 0
+          AND f.contenthash IS NOT NULL
           AND (
                 (c.contextlevel = %s AND c.instanceid = %s)
                 OR
@@ -156,142 +215,121 @@ def get_course_pdfs(courseid: int):
               )
         ORDER BY f.filename
     """
-
     cur.execute(sql, (
         MODULE_CONTEXTLEVEL,
-        COURSE_CONTEXTLEVEL, courseid,
-        MODULE_CONTEXTLEVEL, courseid,
+        COURSE_CONTEXTLEVEL,
+        courseid,
+        MODULE_CONTEXTLEVEL,
+        courseid,
     ))
-
     rows = cur.fetchall()
     cur.close()
     conn.close()
-
     return rows
 
 
-def get_collection_for_course(chroma_client, courseid: int):
-    collection_name = f"course_docs_{courseid}"
-
+def get_collection_for_course(chroma_client: PersistentClient, courseid: int):
+    name = f"course_docs_{courseid}"
     if RESET_COLLECTION:
         try:
-            chroma_client.delete_collection(collection_name)
-            print(f"[INFO] Deleted existing collection: {collection_name}")
+            chroma_client.delete_collection(name)
+            print(f"[INFO] Deleted existing collection: {name}")
         except Exception:
             pass
-
     collection = chroma_client.get_or_create_collection(
-        name=collection_name,
-        metadata={"hnsw:space": "cosine"},
-        embedding_function=embedding_fn
+        name=name,
+        embedding_function=DefaultEmbeddingFunction(),
+        metadata={"courseid": courseid, "kind": "moodle_course_docs"},
     )
-    return collection_name, collection
+    return name, collection
 
 
-def ingest_pdf_into_collection(collection, contenthash: str, filename: str):
-    sub1 = contenthash[:2]
-    sub2 = contenthash[2:4]
-    pdf_path = f"{MOODLEDATA_PATH}/{sub1}/{sub2}/{contenthash}"
+def pdf_path_from_hash(contenthash: str) -> str:
+    return os.path.join(MOODLEDATA_PATH, contenthash[:2], contenthash[2:4], contenthash)
 
+
+def extract_page_texts(pdf_path: str) -> List[Tuple[int, str]]:
+    page_texts: List[Tuple[int, str]] = []
+    with fitz.open(pdf_path) as doc:
+        for idx, page in enumerate(doc, start=1):
+            text = normalize(page.get_text("text") or "")
+            if text:
+                page_texts.append((idx, text))
+    return page_texts
+
+
+def build_records_for_pdf(courseid: int, contenthash: str, filename: str, contextlevel: int) -> Tuple[List[str], List[str], List[Dict]]:
+    pdf_path = pdf_path_from_hash(contenthash)
     if not os.path.exists(pdf_path):
-        print(f"[SKIP] Missing file: {pdf_path}")
-        return 0
+        print(f"[WARN] Missing PDF file for hash={contenthash} filename={filename}")
+        return [], [], []
 
-    print(f"[INFO] Processing: {filename}")
-
-    try:
-        doc = fitz.open(pdf_path)
-    except Exception as e:
-        print(f"[SKIP] Could not open PDF {filename}: {e}")
-        return 0
-
-    text = ""
-    for page in doc:
-        try:
-            text += (page.get_text() or "") + "\n"
-        except Exception:
-            continue
-
-    text = normalize(text)
-    if not text:
-        print(f"[SKIP] No text extracted: {filename}")
-        return 0
-
-    chunks = chunk_text(text)
-    if not chunks:
-        print(f"[SKIP] No chunks created: {filename}")
-        return 0
-
-    ids = [f"{contenthash}_{i}" for i in range(len(chunks))]
-    metadatas = [{"source": filename} for _ in chunks]
+    ids: List[str] = []
+    docs: List[str] = []
+    metas: List[Dict] = []
 
     try:
-        documents = [f"[SOURCE: {filename}]\n{c}" for c in chunks]
-        collection.upsert(ids=ids, documents=documents, metadatas=metadatas)
-        print(f"[OK] Upserted {len(chunks)} chunks from {filename}")
-        return len(chunks)
-    except Exception as e:
-        print(f"[ERROR] Failed to upsert chunks for {filename}: {e}")
-        return 0
+        page_texts = extract_page_texts(pdf_path)
+    except Exception as exc:
+        print(f"[WARN] Could not parse {filename}: {exc}")
+        return [], [], []
+
+    for page_num, page_text in page_texts:
+        title_hint = page_title_hint(page_text)
+        blocks = split_into_structured_blocks(page_text)
+        for chunk_index, block in enumerate(blocks):
+            rec_id = f"{contenthash}:p{page_num}:c{chunk_index}"
+            ids.append(rec_id)
+            docs.append(block)
+            metas.append({
+                "courseid": int(courseid),
+                "source": filename,
+                "page": int(page_num),
+                "chunk_index": int(chunk_index),
+                "contextlevel": int(contextlevel),
+                "section_type": infer_section_type(block),
+                "title_hint": title_hint,
+                "contenthash": contenthash,
+            })
+    return ids, docs, metas
 
 
-def ingest_course(chroma_client, courseid: int):
+def ingest_course(chroma_client: PersistentClient, courseid: int) -> None:
     pdfs = get_course_pdfs(courseid)
-    collection_name, collection = get_collection_for_course(chroma_client, courseid)
+    if not pdfs:
+        print(f"[INFO] No PDFs found for course {courseid}")
+        return
 
-    print(f"[INFO] Using collection: {collection_name}")
-    print(f"[INFO] Found {len(pdfs)} PDFs for course {courseid}.")
+    collection_name, collection = get_collection_for_course(chroma_client, courseid)
+    print(f"[INFO] Ingesting course={courseid} into {collection_name} ({len(pdfs)} PDF(s))")
 
     total_chunks = 0
-    for contenthash, filename in pdfs:
-        total_chunks += ingest_pdf_into_collection(collection, contenthash, filename)
+    for contenthash, filename, contextlevel in pdfs:
+        ids, docs, metas = build_records_for_pdf(courseid, contenthash, filename, contextlevel)
+        if not ids:
+            continue
+        collection.upsert(ids=ids, documents=docs, metadatas=metas)
+        total_chunks += len(ids)
+        print(f"  [OK] {filename}: {len(ids)} chunk(s)")
 
-    print(f"[SUCCESS] Course {courseid} ingestion completed. Total chunks: {total_chunks}")
-    return {
-        "courseid": courseid,
-        "collection": collection_name,
-        "pdfs": len(pdfs),
-        "chunks": total_chunks,
-    }
-
-
-# -----------------------------
-# CHROMA INIT
-# -----------------------------
-chroma = PersistentClient(path=CHROMA_DB_PATH)
-embedding_fn = DefaultEmbeddingFunction()
+    print(f"[DONE] course={courseid} total_chunks={total_chunks}")
 
 
 # -----------------------------
 # MAIN
 # -----------------------------
 if __name__ == "__main__":
+    chroma = PersistentClient(path=CHROMA_DB_PATH)
+
     if TARGET_COURSE_ID > 0:
         course_ids = [TARGET_COURSE_ID]
         print(f"[INFO] Single-course mode: TARGET_COURSE_ID={TARGET_COURSE_ID}")
     else:
         course_ids = get_all_course_ids_with_pdfs()
-        print(f"[INFO] All-courses mode: found {len(course_ids)} course(s) with PDFs.")
+        print(f"[INFO] All-courses mode: found {len(course_ids)} course(s) with PDFs")
 
-    if not course_ids:
-        print("[WARN] No courses with PDFs were found.")
-        raise SystemExit(0)
-
-    summary = []
-    for courseid in course_ids:
+    for cid in course_ids:
         try:
-            result = ingest_course(chroma, courseid)
-            summary.append(result)
-        except Exception as e:
-            print(f"[ERROR] Failed course {courseid}: {e}")
-
-    print("\n========== INGEST SUMMARY ==========")
-    for item in summary:
-        print(
-            f"Course {item['courseid']}: "
-            f"{item['pdfs']} PDF(s), "
-            f"{item['chunks']} chunk(s), "
-            f"collection={item['collection']}"
-        )
-
-    print("[DONE] Moodle ingestion finished.")
+            ingest_course(chroma, cid)
+        except Exception as exc:
+            print(f"[ERROR] Failed course={cid}: {exc}")

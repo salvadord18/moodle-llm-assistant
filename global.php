@@ -1,19 +1,4 @@
 <?php
-/**
- * Global Chat Page (Center Panel)
- * --------------------------------
- * This page renders the Global assistant in the main content area.
- *
- * Design:
- * - Uses courseid = 0 to represent the global conversation
- * - Loads and clears history using history_endpoint.php
- * - Sends questions via rag_endpoint.php (Moodle -> FastAPI proxy)
- *
- * Intended use:
- * - Faculty rules/norms stored in a hidden course (e.g., "Serviços Académicos")
- * - Users access this global chat directly from dashboard/home (no need to enter that course)
- */
-
 require_once(__DIR__ . '/../../config.php');
 
 require_login();
@@ -31,9 +16,6 @@ echo $OUTPUT->header();
 ?>
 
 <style>
-/* ==============================================
-   Global Chat UI (Center Panel)
-   ============================================== */
 .llm-center-wrap { max-width: 980px; margin: 0 auto; }
 .llm-card { background:#fff; border:1px solid #d0d7de; border-radius:14px; overflow:hidden; }
 .llm-header { background:#0b5ed7; color:#fff; padding:12px 14px; display:flex; justify-content:space-between; align-items:center; }
@@ -44,6 +26,8 @@ echo $OUTPUT->header();
 .llm-chat-window { height:min(72vh, 740px); overflow-y:auto; padding:16px; background:#fafafa; }
 .llm-msg-user { background:#d4edda; padding:10px 12px; margin:0 0 10px 0; border-radius:14px; max-width:80%; margin-left:auto; white-space:pre-wrap; }
 .llm-msg-bot { background:#e9ecef; padding:10px 12px; margin:0 0 10px 0; border-radius:14px; max-width:80%; white-space:pre-wrap; }
+.llm-sources { margin-top:8px; font-size:12px; opacity:0.9; }
+.llm-chip { display:inline-block; padding:2px 8px; margin:2px 6px 0 0; border-radius:999px; background:#fff; border:1px solid #d0d7de; }
 .llm-input-row { display:flex; gap:10px; padding:12px; border-top:1px solid #d0d7de; background:#fff; position:sticky; bottom:0; }
 .llm-input { flex:1; border:1px solid #c6cbd1; border-radius:12px; padding:10px; resize:none; outline:none; }
 .llm-send { background:#0b5ed7; color:#fff; border:none; border-radius:12px; padding:10px 14px; cursor:pointer; }
@@ -75,19 +59,19 @@ echo $OUTPUT->header();
 
 <script>
 (function() {
-  // ==============================================
-  // Global Chat Settings
-  // ==============================================
   const apiUrl = <?php echo json_encode($apiurl); ?>;
   const historyUrl = <?php echo json_encode($historyurl); ?>;
-  const courseId = 0; // global conversation
+  const courseId = 0;
+  const labelSources = "Sources:";
 
   const chatWindow = document.getElementById("llm_chat_window");
   const sendBtn = document.getElementById("llm_send");
   const input = document.getElementById("llm_input");
   const clearBtn = document.getElementById("llm_clear");
 
-  function scrollToBottom() { chatWindow.scrollTop = chatWindow.scrollHeight; }
+  function scrollToBottom() {
+    chatWindow.scrollTop = chatWindow.scrollHeight;
+  }
 
   function addMessage(text, who) {
     const div = document.createElement("div");
@@ -97,10 +81,66 @@ echo $OUTPUT->header();
     scrollToBottom();
   }
 
+  function addAssistantMessage(answer, sources) {
+    const wrap = document.createElement("div");
+    wrap.className = "llm-msg-bot";
+
+    const text = document.createElement("div");
+    text.textContent = answer;
+    wrap.appendChild(text);
+
+    if (Array.isArray(sources) && sources.length) {
+      const src = document.createElement("div");
+      src.className = "llm-sources";
+
+      const formatted = [];
+      const seen = new Set();
+
+      sources.forEach(function(s) {
+        let label = "";
+
+        if (typeof s === "string") {
+          label = s.trim();
+        } else if (s && typeof s === "object") {
+          const source = (typeof s.source === "string") ? s.source.trim() : "Unknown source";
+          const page = (s.page !== undefined && s.page !== null) ? " (p. " + s.page + ")" : "";
+          label = source + page;
+        }
+
+        if (label && !seen.has(label)) {
+          seen.add(label);
+          formatted.push(label);
+        }
+      });
+
+      if (formatted.length) {
+        const title = document.createElement("div");
+        title.style.marginTop = "8px";
+        title.style.fontWeight = "600";
+        title.textContent = labelSources;
+        src.appendChild(title);
+
+        const chips = document.createElement("div");
+        formatted.forEach(function(t) {
+          const chip = document.createElement("span");
+          chip.className = "llm-chip";
+          chip.textContent = t;
+          chips.appendChild(chip);
+        });
+
+        src.appendChild(chips);
+        wrap.appendChild(src);
+      }
+    }
+
+    chatWindow.appendChild(wrap);
+    scrollToBottom();
+  }
+
   function addThinking() {
     const div = document.createElement("div");
     div.className = "llm-msg-bot";
-    div.innerHTML = `<span class="llm-spinner"></span>Thinking...`;
+    div.innerHTML = '<span class="llm-spinner"></span>Thinking...';
     chatWindow.appendChild(div);
     scrollToBottom();
     return div;
@@ -111,16 +151,25 @@ echo $OUTPUT->header();
       const res = await fetch(historyUrl, {
         method: "POST",
         headers: {"Content-Type": "application/x-www-form-urlencoded"},
-        body: new URLSearchParams({ sesskey: M.cfg.sesskey, action: "load", courseid: courseId })
+        body: new URLSearchParams({
+          sesskey: M.cfg.sesskey,
+          action: "load",
+          courseid: courseId
+        })
       });
+
       const data = await res.json();
       const messages = data.messages || [];
+
       chatWindow.innerHTML = "";
       if (!messages.length) {
         addMessage("Hi! Ask me about faculty rules and general information.", "bot");
         return;
       }
-      messages.forEach(m => addMessage(m.message, m.role === "user" ? "user" : "bot"));
+
+      messages.forEach(function(m) {
+        addMessage(m.message, m.role === "user" ? "user" : "bot");
+      });
     } catch (e) {
       chatWindow.innerHTML = "";
       addMessage("Hi! Ask me about faculty rules and general information.", "bot");
@@ -132,9 +181,14 @@ echo $OUTPUT->header();
       await fetch(historyUrl, {
         method: "POST",
         headers: {"Content-Type": "application/x-www-form-urlencoded"},
-        body: new URLSearchParams({ sesskey: M.cfg.sesskey, action: "clear", courseid: courseId })
+        body: new URLSearchParams({
+          sesskey: M.cfg.sesskey,
+          action: "clear",
+          courseid: courseId
+        })
       });
     } catch (e) {}
+
     chatWindow.innerHTML = "";
     addMessage("Hi! Ask me about faculty rules and general information.", "bot");
   }
@@ -152,15 +206,29 @@ echo $OUTPUT->header();
       const res = await fetch(apiUrl, {
         method: "POST",
         headers: {"Content-Type": "application/x-www-form-urlencoded"},
-        body: new URLSearchParams({ sesskey: M.cfg.sesskey, question: q, courseid: courseId })
+        body: new URLSearchParams({
+          sesskey: M.cfg.sesskey,
+          question: q,
+          courseid: courseId
+        })
       });
 
       const raw = await res.text();
       let data = {};
-      try { data = JSON.parse(raw); } catch (e) { data = {answer: "Error: invalid JSON response."}; }
+      try {
+        data = JSON.parse(raw);
+      } catch (e) {
+        data = {answer: "Error: invalid JSON response.", sources: []};
+      }
 
       thinkingEl.remove();
-      addMessage(data.answer || "No answer returned.", "bot");
+
+      const answer =
+        (typeof data.answer === "string" && data.answer.trim() !== "")
+          ? data.answer.trim()
+          : "No answer returned.";
+
+      addAssistantMessage(answer, Array.isArray(data.sources) ? data.sources : []);
     } catch (err) {
       thinkingEl.remove();
       addMessage("Error contacting the assistant. Please try again.", "bot");
@@ -169,12 +237,16 @@ echo $OUTPUT->header();
 
   clearBtn.addEventListener("click", clearHistory);
   sendBtn.addEventListener("click", sendMessage);
-  input.addEventListener("keydown", (e) => {
-    if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); sendMessage(); }
+
+  input.addEventListener("keydown", function(e) {
+    if (e.key === "Enter" && !e.shiftKey) {
+      e.preventDefault();
+      sendMessage();
+    }
   });
 
   loadHistory();
 })();
 </script>
 
-<?php echo $OUTPUT->footer();
+<?php echo $OUTPUT->footer(); ?>
