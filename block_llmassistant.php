@@ -50,7 +50,7 @@ class block_llmassistant extends block_base {
         $labelthinking = 'Thinking...';
         $labelsources = 'Sources:';
         $labelwelcome_course = 'Hi! Ask me something about this course.';
-        $labelwelcome_global = 'Hi! Ask me about faculty rules and general information.';
+        $labelwelcome_global = 'Hi! Ask me about academic regulations, deadlines and faculty rules.';
 
         $apiurl_js = json_encode($apiurl, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
         $historyurl_js = json_encode($historyurl, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);

@@ -7,8 +7,8 @@ $PAGE->requires->css('/blocks/llmassistant/styles.css');
 $PAGE->set_url(new moodle_url('/blocks/llmassistant/global.php'));
 $PAGE->set_context(context_system::instance());
 $PAGE->set_pagelayout('mydashboard');
-$PAGE->set_title('LLM Assistant (Global)');
-$PAGE->set_heading('LLM Assistant (Global)');
+$PAGE->set_title('LLM Academic Regulations Assistant');
+$PAGE->set_heading('LLM Academic Regulations Assistant');
 
 $apiurl = (new moodle_url('/blocks/llmassistant/rag_endpoint.php'))->out(false);
 $historyurl = (new moodle_url('/blocks/llmassistant/history_endpoint.php'))->out(false);
@@ -34,7 +34,7 @@ echo $OUTPUT->header();
           </span>
           <span>LLM Assistant</span>
         </div>
-        <div class="llm-subtitle">Faculty rules, norms and general information</div>
+        <div class="llm-subtitle">Academic services regulations, rules and deadlines</div>
       </div>
 
       <div class="llm-actions">
@@ -55,7 +55,7 @@ echo $OUTPUT->header();
     <div id="llm_chat_window" class="llm-chat-window llm-chat-window--expanded"></div>
 
     <div class="llm-input-row">
-      <textarea id="llm_input" class="llm-input" rows="2" placeholder="Ask about rules, deadlines, regulations..."></textarea>
+      <textarea id="llm_input" class="llm-input" rows="2" placeholder="Ask about regulations, deadlines, enrollment, exams..."></textarea>
       <button type="button"
               id="llm_send"
               class="llm-send-icon"

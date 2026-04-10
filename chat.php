@@ -11,7 +11,7 @@ $PAGE->requires->css('/blocks/llmassistant/styles.css');
 $PAGE->set_url(new moodle_url('/blocks/llmassistant/chat.php', ['courseid' => $courseid]));
 $PAGE->set_context($context);
 $PAGE->set_pagelayout('course');
-$PAGE->set_title('LLM Assistant');
+$PAGE->set_title('LLM Course Assistant');
 $PAGE->set_heading($course->fullname);
 
 $apiurl = (new moodle_url('/blocks/llmassistant/rag_endpoint.php'))->out(false);

@@ -284,25 +284,38 @@ def compress_doc(doc: str, query_text: str) -> str:
 def pack_context(ranked_items, query_text: str):
     context = []
     used_sources = []
+    seen = set()
     total = 0
 
     for doc, meta, dist, score in ranked_items:
         src = (meta or {}).get("source", "unknown.pdf")
+        page = (meta or {}).get("page")
         d2 = compress_doc(doc, query_text)
 
         if d2.lstrip().startswith("[SOURCE:"):
             block = f"{d2}\n"
         else:
-            block = f"[SOURCE: {src}]\n{d2}\n"
+            label = f"[SOURCE: {src}"
+            if page is not None:
+                label += f" (p. {page})"
+            label += "]"
+            block = f"{label}\n{d2}\n"
 
         if total + len(block) > MAX_CONTEXT_CHARS:
             break
 
         context.append(block)
-        used_sources.append(src)
+
+        key = (src, page)
+        if key not in seen:
+            seen.add(key)
+            rec = {"source": src}
+            if page is not None:
+                rec["page"] = page
+            used_sources.append(rec)
+
         total += len(block)
 
-    used_sources = list(dict.fromkeys(used_sources))
     return "\n".join(context), used_sources
 
 
