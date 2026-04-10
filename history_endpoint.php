@@ -32,6 +32,7 @@ try {
                 'role' => $m->role,
                 'message' => $m->message,
                 'timecreated' => $m->timecreated,
+                'sources' => $m->sourcesjson ? json_decode($m->sourcesjson, true) : [],
             ];
         }
 

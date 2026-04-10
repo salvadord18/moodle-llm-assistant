@@ -13,7 +13,7 @@ class history_manager {
      * @param string $role 'user' ou 'assistant'
      * @param string $message
      */
-    public static function save_message($userid, $courseid, $role, $message) {
+    public static function save_message($userid, $courseid, $role, $message, $sourcesjson = null) {
         global $DB;
 
         $record = new \stdClass();
@@ -21,6 +21,7 @@ class history_manager {
         $record->courseid = $courseid;
         $record->role = $role;
         $record->message = $message;
+        $record->sourcesjson = $sourcesjson;
         $record->timecreated = time();
 
         $DB->insert_record('block_llmassistant_msg', $record);

@@ -172,8 +172,12 @@ echo $OUTPUT->header();
         return;
       }
 
-      for (const m of messages) {
-        addMessage(m.message, m.role === "user" ? "user" : "bot");
+      for (const m of messages) {   
+        if (m.role === "assistant") {
+            addAssistantMessage(m.message, m.sources || []);
+          } else {
+            addMessage(m.message, "user");
+          }
       }
     } catch (e) {
       chatWindow.innerHTML = "";

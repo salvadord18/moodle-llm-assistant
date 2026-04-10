@@ -17,6 +17,7 @@
         <FIELD NAME="courseid" TYPE="int" LENGTH="10" NOTNULL="true" DEFAULT="0"/>
         <FIELD NAME="role" TYPE="char" LENGTH="10" NOTNULL="true" COMMENT="user|assistant"/>
         <FIELD NAME="message" TYPE="text" NOTNULL="true"/>
+        <FIELD NAME="sourcesjson" TYPE="text" NOTNULL="false" SEQUENCE="false"/>
         <FIELD NAME="timecreated" TYPE="int" LENGTH="10" NOTNULL="true"/>
       </FIELDS>
       <KEYS>

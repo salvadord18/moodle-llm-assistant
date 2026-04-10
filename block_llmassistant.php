@@ -206,7 +206,11 @@ class block_llmassistant extends block_base {
       addMessage(welcomeMsg, "bot");
 
       msgs.forEach(function(m) {
-        addMessage(m.message, m.role === "user" ? "user" : "bot");
+        if (m.role === "assistant") {
+          addAssistantMessage(m.message, m.sources || []);
+        } else {
+          addMessage(m.message, "user");
+        }
       });
     } catch (e) {
       chatWindow.innerHTML = "";

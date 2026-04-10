@@ -117,7 +117,15 @@ try {
 
     // Persist the new user turn + assistant turn.
     \block_llmassistant\local\history_manager::save_message($userid, $courseid, 'user', $question);
-    \block_llmassistant\local\history_manager::save_message($userid, $courseid, 'assistant', $answer);
+    $sourcesjson = json_encode($sources, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+
+    \block_llmassistant\local\history_manager::save_message(
+        $userid,
+        $courseid,
+        'assistant',
+        $answer,
+        $sourcesjson
+    );
 
     if (ob_get_length()) {
         ob_clean();
