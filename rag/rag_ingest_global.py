@@ -5,10 +5,10 @@ Global RAG Ingestion for Moodle (Faculty rules / regulations)
 Builds a single Chroma collection called: global_docs
 
 Source selection:
-1) If GLOBAL_SOURCE_COURSE_ID > 0, use that course
-2) Otherwise, try to resolve by course name patterns:
-   - "Serviços Académicos"
-   - "Academic services"
+- Detects the Moodle course whose fullname or shortname contains:
+  - "Serviços Académicos"
+  - "Academic services"
+- Matching is accent-insensitive and case-insensitive
 
 What this version improves:
 - Reuses the same structured, page-aware chunking logic as rag_ingest_moodle.py
@@ -27,6 +27,7 @@ What this version improves:
 
 import os
 import re
+import unicodedata
 from typing import Dict, List, Tuple
 
 import fitz
@@ -40,7 +41,10 @@ from chromadb.utils.embedding_functions import DefaultEmbeddingFunction
 MOODLEDATA_PATH = os.getenv("MOODLEDATA_PATH", "/var/www/moodledata/filedir")
 CHROMA_DB_PATH = os.getenv("CHROMA_DB_PATH", "/var/www/moodledata/chroma_db")
 
-GLOBAL_SOURCE_COURSE_ID = int(os.getenv("GLOBAL_SOURCE_COURSE_ID", "315"))
+# If > 0, force a course id manually (optional override for debugging).
+# Keep default = 0 so name-based detection is the normal behaviour.
+GLOBAL_SOURCE_COURSE_ID = int(os.getenv("GLOBAL_SOURCE_COURSE_ID", "0"))
+
 GLOBAL_SOURCE_PATTERNS = [
     s.strip() for s in os.getenv(
         "GLOBAL_SOURCE_PATTERNS",
@@ -83,6 +87,19 @@ def normalize(text: str) -> str:
         if line:
             cleaned.append(line)
     return "\n".join(cleaned)
+
+
+def normalize_compare(text: str) -> str:
+    """
+    Accent-insensitive, case-insensitive normalisation for course name matching.
+    Example:
+      'Serviços Académicos' -> 'servicos academicos'
+    """
+    text = (text or "").strip().lower()
+    text = unicodedata.normalize("NFKD", text)
+    text = "".join(ch for ch in text if not unicodedata.combining(ch))
+    text = re.sub(r"\s+", " ", text)
+    return text.strip()
 
 
 def infer_section_type(text: str) -> str:
@@ -166,38 +183,93 @@ def db_connect():
 
 
 def resolve_global_source_course_id() -> int:
+    """
+    Resolve the global source course by:
+    1) GLOBAL_SOURCE_COURSE_ID if manually forced
+    2) Otherwise, detect by course fullname/shortname patterns
+       using accent-insensitive and case-insensitive matching
+    """
     if GLOBAL_SOURCE_COURSE_ID > 0:
+        print(f"[INFO] Using GLOBAL_SOURCE_COURSE_ID override: {GLOBAL_SOURCE_COURSE_ID}")
         return GLOBAL_SOURCE_COURSE_ID
+
+    patterns = [normalize_compare(p) for p in GLOBAL_SOURCE_PATTERNS]
+    if not patterns:
+        raise RuntimeError("GLOBAL_SOURCE_PATTERNS is empty. Please define at least one pattern.")
 
     conn = db_connect()
     cur = conn.cursor()
 
-    conditions = []
-    params = []
-    for p in GLOBAL_SOURCE_PATTERNS:
-        conditions.append(f"(fullname ILIKE %s OR shortname ILIKE %s)")
-        params.extend([f"%{p}%", f"%{p}%"])
-
     sql = f"""
         SELECT id, fullname, shortname
         FROM {DB_PREFIX}course
-        WHERE {' OR '.join(conditions)}
         ORDER BY id ASC
-        LIMIT 1
     """
-    cur.execute(sql, params)
-    row = cur.fetchone()
+    cur.execute(sql)
+    rows = cur.fetchall()
     cur.close()
     conn.close()
 
-    if not row:
+    matches = []
+
+    for cid, fullname, shortname in rows:
+        fullname_n = normalize_compare(fullname or "")
+        shortname_n = normalize_compare(shortname or "")
+
+        best_score = 0
+        matched_pattern = None
+
+        for pattern in patterns:
+            score = 0
+
+            # Exact match strongest
+            if fullname_n == pattern or shortname_n == pattern:
+                score = 100
+
+            # Startswith next best
+            elif fullname_n.startswith(pattern) or shortname_n.startswith(pattern):
+                score = 80
+
+            # Contains still acceptable
+            elif pattern in fullname_n or pattern in shortname_n:
+                score = 60
+
+            if score > best_score:
+                best_score = score
+                matched_pattern = pattern
+
+        if best_score > 0:
+            matches.append({
+                "id": int(cid),
+                "fullname": fullname or "",
+                "shortname": shortname or "",
+                "score": best_score,
+                "pattern": matched_pattern,
+            })
+
+    if not matches:
         raise RuntimeError(
             f"Could not resolve global source course by patterns: {GLOBAL_SOURCE_PATTERNS}"
         )
 
-    cid, fullname, shortname = row
-    print(f"[INFO] Resolved global source course: id={cid}, fullname={fullname}, shortname={shortname}")
-    return int(cid)
+    # Best score first, then lowest id for deterministic behaviour
+    matches.sort(key=lambda x: (-x["score"], x["id"]))
+
+    best = matches[0]
+
+    if len(matches) > 1:
+        print("[WARN] Multiple courses matched the global patterns. Candidates:")
+        for m in matches[:10]:
+            print(
+                f"  - id={m['id']} score={m['score']} "
+                f"fullname={m['fullname']} shortname={m['shortname']} pattern={m['pattern']}"
+            )
+
+    print(
+        f"[INFO] Resolved global source course: "
+        f"id={best['id']}, fullname={best['fullname']}, shortname={best['shortname']}, pattern={best['pattern']}"
+    )
+    return int(best["id"])
 
 
 def get_course_pdfs(courseid: int) -> List[Tuple[str, str, int]]:

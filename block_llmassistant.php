@@ -9,13 +9,46 @@ class block_llmassistant extends block_base {
 
     public function applicable_formats() {
         return [
+            'all'         => false,
             'course-view' => true,
-            'site' => true,
-            'my' => true,
+            'site-index'  => true,
+            'my'          => true,
         ];
     }
 
     public function instance_allow_multiple() {
+        return false;
+    }
+
+    /**
+     * Detect if a course should behave as the GLOBAL regulations source
+     * based on course fullname / shortname.
+     *
+     * Matches examples like:
+     * - "Serviços Académicos"
+     * - "Servicos Academicos"
+     * - "Academic services"
+     */
+    protected function is_global_source_course($course): bool {
+        if (empty($course) || empty($course->id)) {
+            return false;
+        }
+
+        $patterns = [
+            'serviços académicos',
+            'servicos academicos',
+            'academic services',
+        ];
+
+        $fullname = core_text::strtolower((string)($course->fullname ?? ''));
+        $shortname = core_text::strtolower((string)($course->shortname ?? ''));
+
+        foreach ($patterns as $pattern) {
+            if (mb_stripos($fullname, $pattern) !== false || mb_stripos($shortname, $pattern) !== false) {
+                return true;
+            }
+        }
+
         return false;
     }
 
@@ -36,11 +69,32 @@ class block_llmassistant extends block_base {
         $apiurl = (new moodle_url('/blocks/llmassistant/rag_endpoint.php'))->out(false);
         $historyurl = (new moodle_url('/blocks/llmassistant/history_endpoint.php'))->out(false);
 
-        $iscourse = (!empty($COURSE->id) && $COURSE->id != SITEID && $PAGE->context->contextlevel == CONTEXT_COURSE);
-        $scope_courseid = $iscourse ? (int)$COURSE->id : 0;
+        $iscourse = (
+            !empty($COURSE->id) &&
+            $COURSE->id != SITEID &&
+            $PAGE->context->contextlevel == CONTEXT_COURSE
+        );
 
-        if ($iscourse) {
-            $openurl = (new moodle_url('/blocks/llmassistant/chat.php', ['courseid' => $COURSE->id]))->out(false);
+        $isglobalsourcecourse = $iscourse && $this->is_global_source_course($COURSE);
+
+        /**
+         * Behaviour:
+         * - normal course page => use that course id
+         * - Academic Services course => force global mode (courseid = 0)
+         * - homepage / dashboard => global mode (courseid = 0)
+         */
+        $scope_courseid = ($iscourse && !$isglobalsourcecourse) ? (int)$COURSE->id : 0;
+
+        /**
+         * Open button:
+         * - normal course => open chat.php?courseid=<id>
+         * - Academic Services course => open global.php
+         * - homepage/dashboard => open global.php
+         */
+        if ($iscourse && !$isglobalsourcecourse) {
+            $openurl = (new moodle_url('/blocks/llmassistant/chat.php', [
+                'courseid' => $COURSE->id
+            ]))->out(false);
         } else {
             $openurl = (new moodle_url('/blocks/llmassistant/global.php'))->out(false);
         }
@@ -55,7 +109,12 @@ class block_llmassistant extends block_base {
         $apiurl_js = json_encode($apiurl, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
         $historyurl_js = json_encode($historyurl, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
         $openurl_js = json_encode($openurl, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
-        $welcome_js = json_encode($iscourse ? $labelwelcome_course : $labelwelcome_global, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
+
+        $welcome_js = json_encode(
+            ($iscourse && !$isglobalsourcecourse) ? $labelwelcome_course : $labelwelcome_global,
+            JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE
+        );
+
         $labelsources_js = json_encode($labelsources, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
         $labelthinking_js = json_encode($labelthinking, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
 
@@ -96,19 +155,19 @@ class block_llmassistant extends block_base {
               class="llm-icon-btn"
               title="Clear conversation"
               aria-label="Clear conversation">
-          <svg
-            viewBox="0 0 24 24"
-            width="18"
-            height="18"
-            fill="none"
-            stroke="currentColor"
-            stroke-width="2"
-            stroke-linecap="round"
-            stroke-linejoin="round"
-            aria-hidden="true">
-            <path d="M20 20H7.5a2 2 0 0 1-1.4-.6l-3.5-3.5a2 2 0 0 1 0-2.8l8.6-8.6a2 2 0 0 1 2.8 0l5 5a2 2 0 0 1 0 2.8L12 20"/>
-            <path d="M6 13l5 5"/>
-          </svg>
+        <svg
+          viewBox="0 0 24 24"
+          width="18"
+          height="18"
+          fill="none"
+          stroke="currentColor"
+          stroke-width="2"
+          stroke-linecap="round"
+          stroke-linejoin="round"
+          aria-hidden="true">
+          <path d="M20 20H7.5a2 2 0 0 1-1.4-.6l-3.5-3.5a2 2 0 0 1 0-2.8l8.6-8.6a2 2 0 0 1 2.8 0l5 5a2 2 0 0 1 0 2.8L12 20"/>
+          <path d="M6 13l5 5"/>
+        </svg>
       </button>
     </div>
   </div>
