@@ -4,7 +4,7 @@ defined('MOODLE_INTERNAL') || die();
 class block_llmassistant extends block_base {
 
     public function init() {
-        $this->title = get_string('pluginname', 'block_llmassistant');
+        $this->title = '';
     }
 
     public function applicable_formats() {
@@ -21,6 +21,8 @@ class block_llmassistant extends block_base {
 
     public function get_content() {
         global $COURSE, $PAGE;
+
+        $PAGE->requires->css('/blocks/llmassistant/styles.css');
 
         if ($this->content !== null) {
             return $this->content;
@@ -44,9 +46,6 @@ class block_llmassistant extends block_base {
         }
 
         $labeltitle = 'LLM Assistant';
-        $labelopen = 'Open';
-        $labelclear = 'Clear';
-        $labelsend = 'Send';
         $labelplaceholder = 'Write your question...';
         $labelthinking = 'Thinking...';
         $labelsources = 'Sources:';
@@ -61,40 +60,72 @@ class block_llmassistant extends block_base {
         $labelthinking_js = json_encode($labelthinking, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
 
         $this->content->text = <<<HTML
-<style>
-.llm-chat-container-{$uid}{background:#f8f9fa;border:1px solid #d0d7de;border-radius:12px;display:flex;flex-direction:column;height:460px;max-height:80vh;overflow:hidden;font-size:14px}
-.llm-chat-header-{$uid}{background:#0b5ed7;color:#fff;padding:10px 12px;display:flex;justify-content:space-between;align-items:center}
-.llm-chat-title-{$uid}{font-weight:600}
-.llm-chat-actions-{$uid}{display:flex;gap:8px;align-items:center}
-.llm-btn-{$uid}{background:rgba(255,255,255,.15);border:1px solid rgba(255,255,255,.25);color:#fff;border-radius:10px;padding:6px 10px;cursor:pointer;font-size:12px}
-.llm-btn-{$uid}:hover{background:rgba(255,255,255,.22)}
-.llm-chat-window-{$uid}{flex:1;overflow-y:auto;padding:12px;background:#fff}
-.llm-msg-user-{$uid}{background:#d4edda;padding:10px;margin-bottom:8px;border-radius:12px;max-width:85%;margin-left:auto;white-space:pre-wrap}
-.llm-msg-bot-{$uid}{background:#e9ecef;padding:10px;margin-bottom:8px;border-radius:12px;max-width:85%;white-space:pre-wrap}
-.llm-sources-{$uid}{margin-top:8px;font-size:12px;opacity:.95}
-.llm-chip-{$uid}{display:inline-block;padding:2px 8px;margin:4px 6px 0 0;border-radius:999px;background:#fff;border:1px solid #d0d7de}
-.llm-chat-inputwrap-{$uid}{display:flex;gap:8px;padding:10px;background:#f8f9fa;border-top:1px solid #d0d7de}
-.llm-input-{$uid}{flex:1;padding:8px;border-radius:10px;border:1px solid #c6cbd1;resize:none;outline:none}
-.llm-send-{$uid}{padding:8px 14px;background:#0b5ed7;border:none;border-radius:10px;color:#fff;cursor:pointer}
-.llm-send-{$uid}:hover{background:#0a53be}
-.llm-spinner-{$uid}{display:inline-block;width:12px;height:12px;border:2px solid #bbb;border-top-color:#333;border-radius:50%;margin-right:8px;animation:llmspin-{$uid} .8s linear infinite}
-@keyframes llmspin-{$uid}{to{transform:rotate(360deg)}}
-</style>
+<div id="llm_chat_{$uid}" class="llm-chat-container">
+  <div class="llm-header">
+    <div class="llm-title">
+      <span class="llm-ai-mark" aria-hidden="true">
+        <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M12 8V4H8"/>
+          <rect x="4" y="8" width="16" height="12" rx="2"/>
+          <path d="M2 14h2"/>
+          <path d="M20 14h2"/>
+          <path d="M9 13h.01"/>
+          <path d="M15 13h.01"/>
+          <path d="M9 17h6"/>
+        </svg>
+      </span>
+      <span>{$labeltitle}</span>
+    </div>
 
-<div id="llm_chat_{$uid}" class="llm-chat-container-{$uid}">
-  <div class="llm-chat-header-{$uid}">
-    <div class="llm-chat-title-{$uid}">{$labeltitle}</div>
-    <div class="llm-chat-actions-{$uid}">
-      <button type="button" id="llm_open_{$uid}" class="llm-btn-{$uid}">{$labelopen}</button>
-      <button type="button" id="llm_clear_{$uid}" class="llm-btn-{$uid}">{$labelclear}</button>
+    <div class="llm-actions">
+      <button type="button"
+              id="llm_open_{$uid}"
+              class="llm-icon-btn"
+              title="Expand chat"
+              aria-label="Expand chat">
+        <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <polyline points="15 3 21 3 21 9"></polyline>
+          <polyline points="9 21 3 21 3 15"></polyline>
+          <line x1="21" y1="3" x2="14" y2="10"></line>
+          <line x1="3" y1="21" x2="10" y2="14"></line>
+        </svg>
+      </button>
+
+      <button type="button"
+              id="llm_clear_{$uid}"
+              class="llm-icon-btn"
+              title="Clear conversation"
+              aria-label="Clear conversation">
+          <svg
+            viewBox="0 0 24 24"
+            width="18"
+            height="18"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="2"
+            stroke-linecap="round"
+            stroke-linejoin="round"
+            aria-hidden="true">
+            <path d="M20 20H7.5a2 2 0 0 1-1.4-.6l-3.5-3.5a2 2 0 0 1 0-2.8l8.6-8.6a2 2 0 0 1 2.8 0l5 5a2 2 0 0 1 0 2.8L12 20"/>
+            <path d="M6 13l5 5"/>
+          </svg>
+      </button>
     </div>
   </div>
 
-  <div id="llm_chat_window_{$uid}" class="llm-chat-window-{$uid}"></div>
+  <div id="llm_chat_window_{$uid}" class="llm-chat-window"></div>
 
-  <div class="llm-chat-inputwrap-{$uid}">
-    <textarea id="llm_input_{$uid}" class="llm-input-{$uid}" rows="2" placeholder="{$labelplaceholder}"></textarea>
-    <button type="button" id="llm_send_{$uid}" class="llm-send-{$uid}">{$labelsend}</button>
+  <div class="llm-chat-inputwrap">
+    <textarea id="llm_input_{$uid}" class="llm-input" rows="2" placeholder="{$labelplaceholder}"></textarea>
+    <button type="button"
+            id="llm_send_{$uid}"
+            class="llm-send-icon"
+            title="Send message"
+            aria-label="Send message">
+      <svg viewBox="0 0 24 24" width="18" height="18">
+        <path fill="currentColor" d="M2 21l21-9L2 3v7l15 2-15 2v7z"/>
+      </svg>
+    </button>
   </div>
 </div>
 
@@ -116,7 +147,7 @@ class block_llmassistant extends block_base {
 
   function addMessage(text, who) {
     const div = document.createElement("div");
-    div.className = (who === "user") ? "llm-msg-user-{$uid}" : "llm-msg-bot-{$uid}";
+    div.className = (who === "user") ? "llm-msg-user" : "llm-msg-bot";
     div.textContent = text;
     chatWindow.appendChild(div);
     chatWindow.scrollTop = chatWindow.scrollHeight;
@@ -124,7 +155,7 @@ class block_llmassistant extends block_base {
 
   function addAssistantMessage(answer, sources) {
     const wrap = document.createElement("div");
-    wrap.className = "llm-msg-bot-{$uid}";
+    wrap.className = "llm-msg-bot";
 
     const text = document.createElement("div");
     text.textContent = answer;
@@ -132,7 +163,7 @@ class block_llmassistant extends block_base {
 
     if (Array.isArray(sources) && sources.length) {
       const src = document.createElement("div");
-      src.className = "llm-sources-{$uid}";
+      src.className = "llm-sources";
 
       const formatted = [];
       const seen = new Set();
@@ -164,7 +195,7 @@ class block_llmassistant extends block_base {
         const chips = document.createElement("div");
         formatted.forEach(function(t) {
           const chip = document.createElement("span");
-          chip.className = "llm-chip-{$uid}";
+          chip.className = "llm-chip";
           chip.textContent = t;
           chips.appendChild(chip);
         });
@@ -180,8 +211,8 @@ class block_llmassistant extends block_base {
 
   function addThinking() {
     const div = document.createElement("div");
-    div.className = "llm-msg-bot-{$uid}";
-    div.innerHTML = '<span class="llm-spinner-{$uid}"></span>' + labelThinking;
+    div.className = "llm-msg-bot";
+    div.innerHTML = '<span class="llm-spinner"></span>' + labelThinking;
     chatWindow.appendChild(div);
     chatWindow.scrollTop = chatWindow.scrollHeight;
     return div;
