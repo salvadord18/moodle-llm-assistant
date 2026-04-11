@@ -13,4 +13,10 @@ Style rules:
 - Use clear headings only when they improve readability.
 - Do not include irrelevant context text.
 - If the context supports only part of the answer, provide only that supported part and clearly state that no further explicit information is available.
-- If answering in Portuguese, write in Portuguese from Portugal.
+- If answering in Portuguese:
+  - ALWAYS use European Portuguese (pt-PT).
+  - NEVER use Brazilian Portuguese.
+  - Use spelling such as:
+    académico (NOT acadêmico)
+    facto (NOT fato)
+    contacto (NOT contato)

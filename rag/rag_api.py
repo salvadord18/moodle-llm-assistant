@@ -44,9 +44,9 @@ STYLE_FILE = "style.txt"
 TOP_K = int(os.getenv("LLMASSISTANT_TOP_K", "30"))
 MAX_CHUNKS = int(os.getenv("LLMASSISTANT_MAX_CHUNKS", "12"))
 MAX_CONTEXT_CHARS = int(os.getenv("LLMASSISTANT_MAX_CONTEXT_CHARS", "14000"))
-MAX_LINES_PER_CHUNK = int(os.getenv("LLMASSISTANT_MAX_LINES_PER_CHUNK", "40"))
+MAX_LINES_PER_CHUNK = int(os.getenv("LLMASSISTANT_MAX_LINES_PER_CHUNK", "80"))
 
-DISTANCE_THRESHOLD = float(os.getenv("LLMASSISTANT_DISTANCE_THRESHOLD", "0.96"))
+DISTANCE_THRESHOLD = float(os.getenv("LLMASSISTANT_DISTANCE_THRESHOLD", "0.90"))
 
 ALPHA_VEC = float(os.getenv("LLMASSISTANT_RERANK_ALPHA", "0.55"))  # vector
 BETA_LEX  = float(os.getenv("LLMASSISTANT_RERANK_BETA", "0.45"))   # lexical
@@ -256,7 +256,11 @@ def compress_doc(doc: str, query_text: str) -> str:
             continue
 
         email_like = bool(EMAIL_RE.search(line_stripped))
-        structured = (":" in line_stripped and len(line_stripped) <= 260)
+        bullet = bool(re.match(r"^[•\-\*]", line_stripped))
+        structured = (
+            (":" in line_stripped and len(line_stripped) <= 260)
+            or bullet
+        )
 
         if email_like or structured:
             keep.append(line_stripped)
@@ -295,7 +299,7 @@ def pack_context(ranked_items, query_text: str):
         if d2.lstrip().startswith("[SOURCE:"):
             block = f"{d2}\n"
         else:
-            label = f"[SOURCE: {src}"
+            label = f"[SOURCE_ID: {src}|p{page}|c{meta.get('chunk_index')}]"    
             if page is not None:
                 label += f" (p. {page})"
             label += "]"
@@ -312,12 +316,49 @@ def pack_context(ranked_items, query_text: str):
             rec = {"source": src}
             if page is not None:
                 rec["page"] = page
-            used_sources.append(rec)
+            used_sources.append({
+                "source": src,
+                "page": page,
+                "content": d2.lower()
+            })
 
         total += len(block)
 
     return "\n".join(context), used_sources
 
+def filter_sources_by_answer(answer: str, sources: list[dict]) -> list[dict]:
+    answer_tokens = tokenize(answer)
+    scored = []
+
+    for s in sources:
+        content_tokens = tokenize(s.get("content", ""))
+        if not content_tokens:
+            continue
+
+        overlap = len(answer_tokens & content_tokens)
+
+        if overlap > 0:
+            scored.append((overlap, s))
+
+    # ordena pelos mais relevantes
+    scored.sort(key=lambda x: -x[0])
+
+    # remove content antes de devolver
+    final = []
+    seen = set()
+
+    for _, s in scored:
+        key = (s.get("source"), s.get("page"))
+        if key not in seen:
+            seen.add(key)
+            final.append({
+                "source": s.get("source"),
+                "page": s.get("page")
+            })
+
+    return final[:3] if final else [
+        {"source": s["source"], "page": s.get("page")} for s in sources[:2]
+    ]
 
 def is_contacts_or_admin(q: str) -> bool:
     ql = (q or "").lower()
@@ -515,6 +556,13 @@ def ask(data: Query):
 QUESTION:
 {q}
 
+You MUST:
+- Extract ALL relevant information from ALL parts of the CONTEXT.
+- Do NOT stop after finding the first answer.
+- If multiple bullet points or rules exist, include ALL of them.
+- Combine information across multiple chunks when necessary.
+- Missing any relevant rule is considered an incomplete answer.
+
 ANSWER:
 """
 
@@ -529,7 +577,10 @@ ANSWER:
     if not answer:
         return {"answer": "Error: empty response from model."}
 
-    resp = {"answer": answer, "sources": used_sources}
+    final_sources = filter_sources_by_answer(answer, used_sources)
+
+    resp = {"answer": answer, "sources": final_sources}
+    
     if DEBUG:
         resp["debug"] = {
             "queries": queries,
