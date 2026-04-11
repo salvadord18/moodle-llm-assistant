@@ -69,6 +69,9 @@ echo $OUTPUT->header();
   </div>
 </div>
 
+<script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/dompurify@3.0.6/dist/purify.min.js"></script>
+
 <script>
 (function() {
   const apiUrl = <?php echo json_encode($apiurl); ?>;
@@ -98,7 +101,7 @@ echo $OUTPUT->header();
     wrap.className = "llm-msg-bot";
 
     const text = document.createElement("div");
-    text.textContent = answer;
+    text.innerHTML = DOMPurify.sanitize(marked.parse(answer));
     wrap.appendChild(text);
 
     if (Array.isArray(sources) && sources.length) {
