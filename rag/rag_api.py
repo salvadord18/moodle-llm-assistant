@@ -17,11 +17,13 @@ from fastapi import FastAPI
 from pydantic import BaseModel, Field
 from chromadb import PersistentClient
 from chromadb.utils.embedding_functions import DefaultEmbeddingFunction
+from itertools import groupby
 import os
 import re
 import time
 import hashlib
 import requests
+import numpy as np
 
 # -----------------------------
 # CONFIG
@@ -287,78 +289,115 @@ def compress_doc(doc: str, query_text: str) -> str:
 
 def pack_context(ranked_items, query_text: str):
     context = []
-    used_sources = []
-    seen = set()
+    source_map = []
     total = 0
+    sid = 1
 
     for doc, meta, dist, score in ranked_items:
         src = (meta or {}).get("source", "unknown.pdf")
         page = (meta or {}).get("page")
+        chunk_index = (meta or {}).get("chunk_index")
         d2 = compress_doc(doc, query_text)
 
-        if d2.lstrip().startswith("[SOURCE:"):
-            block = f"{d2}\n"
-        else:
-            label = f"[SOURCE_ID: {src}|p{page}|c{meta.get('chunk_index')}]"    
-            if page is not None:
-                label += f" (p. {page})"
-            label += "]"
-            block = f"{label}\n{d2}\n"
+        source_id = f"S{sid}"
+        label = f"[SOURCE_ID: {source_id}|{src}|p{page}|c{chunk_index}]"
+        block = f"{label}\n{d2}\n"
 
         if total + len(block) > MAX_CONTEXT_CHARS:
             break
 
         context.append(block)
-
-        key = (src, page)
-        if key not in seen:
-            seen.add(key)
-            rec = {"source": src}
-            if page is not None:
-                rec["page"] = page
-            used_sources.append({
-                "source": src,
-                "page": page,
-                "content": d2.lower()
-            })
+        source_map.append({
+            "id": source_id,
+            "source": src,
+            "page": page,
+            "chunk_index": chunk_index,
+            "content": d2.lower(),
+            "embedding": embed(d2.lower())
+        })
 
         total += len(block)
+        sid += 1
 
-    return "\n".join(context), used_sources
+    return "\n".join(context), source_map
 
-def filter_sources_by_answer(answer: str, sources: list[dict]) -> list[dict]:
-    answer_tokens = tokenize(answer)
+def format_pages(pages):
+    """Convert [1,2,3,5,6] -> 'p. 1-3, 5-6'"""
+    if not pages:
+        return ""
+
+    pages = sorted(set(int(p) for p in pages if p is not None))
+
+    ranges = []
+    for _, group in groupby(enumerate(pages), lambda x: x[0] - x[1]):
+        group = list(group)
+        start = group[0][1]
+        end = group[-1][1]
+        if start == end:
+            ranges.append(f"{start}")
+        else:
+            ranges.append(f"{start}-{end}")
+
+    return "p. " + ", ".join(ranges)
+
+def format_sources(source_map):
+    """
+    Groups by file and formats pages nicely:
+    Lecture1.pdf (p. 4-5)
+    Lecture2.pdf (p. 1, 3, 7)
+    """
+
+    grouped = {}
+
+    for item in source_map:
+        src = item["source"]
+        page = item.get("page")
+
+        if src not in grouped:
+            grouped[src] = []
+
+        if page is not None:
+            grouped[src].append(page)
+
+    output = []
+    for src, pages in grouped.items():
+        if pages:
+            output.append(f"{src} ({format_pages(pages)})")
+        else:
+            output.append(src)
+
+    return output
+
+def score_answer_support(answer: str, source_map: list):
+    sentences = re.split(r"[.!?]\s+", answer)
+    embs = [embed(s) for s in sentences if s.strip()]
+
+    if not embs:
+        return []
+
+    answer_emb = np.mean(embs, axis=0)
+
     scored = []
 
-    for s in sources:
-        content_tokens = tokenize(s.get("content", ""))
-        if not content_tokens:
+    for item in source_map:
+        chunk_emb = item.get("embedding")
+        if chunk_emb is None or len(chunk_emb) == 0:
             continue
 
-        overlap = len(answer_tokens & content_tokens)
+        sim = cosine_similarity(answer_emb, chunk_emb)
 
-        if overlap > 0:
-            scored.append((overlap, s))
+        scored.append((item, sim))
 
-    # ordena pelos mais relevantes
-    scored.sort(key=lambda x: -x[0])
+    return sorted(scored, key=lambda x: -x[1])
 
-    # remove content antes de devolver
-    final = []
-    seen = set()
+def embed(text: str):
+    """Uses the same embedding function as Chroma"""
+    return embedding_fn([text])[0]
 
-    for _, s in scored:
-        key = (s.get("source"), s.get("page"))
-        if key not in seen:
-            seen.add(key)
-            final.append({
-                "source": s.get("source"),
-                "page": s.get("page")
-            })
-
-    return final[:3] if final else [
-        {"source": s["source"], "page": s.get("page")} for s in sources[:2]
-    ]
+def cosine_similarity(a, b):
+    a = np.array(a)
+    b = np.array(b)
+    return float(np.dot(a, b) / (np.linalg.norm(a) * np.linalg.norm(b) + 1e-9))
 
 def is_contacts_or_admin(q: str) -> bool:
     ql = (q or "").lower()
@@ -577,7 +616,11 @@ ANSWER:
     if not answer:
         return {"answer": "Error: empty response from model."}
 
-    final_sources = filter_sources_by_answer(answer, used_sources)
+    scored = score_answer_support(answer, used_sources)
+
+    filtered = [s[0] for s in scored if s[1] > 0.25]  # threshold ajustável
+
+    final_sources = format_sources(filtered)
 
     resp = {"answer": answer, "sources": final_sources}
     
