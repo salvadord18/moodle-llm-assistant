@@ -32,7 +32,7 @@ CHROMA_DB_PATH = "/var/www/moodledata/chroma_db"
 
 OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://host.docker.internal:11434")
 OLLAMA_GEN_URL = f"{OLLAMA_BASE_URL}/api/generate"
-LLM_MODEL = os.getenv("OLLAMA_LLM_MODEL", "qwen2.5:1.5b")
+LLM_MODEL = os.getenv("OLLAMA_LLM_MODEL", "qwen2.5:3b")
 
 PROMPTS_DIR = os.getenv(
     "LLMASSISTANT_PROMPTS_DIR",
@@ -48,7 +48,7 @@ MAX_CHUNKS = int(os.getenv("LLMASSISTANT_MAX_CHUNKS", "12"))
 MAX_CONTEXT_CHARS = int(os.getenv("LLMASSISTANT_MAX_CONTEXT_CHARS", "14000"))
 MAX_LINES_PER_CHUNK = int(os.getenv("LLMASSISTANT_MAX_LINES_PER_CHUNK", "80"))
 
-DISTANCE_THRESHOLD = float(os.getenv("LLMASSISTANT_DISTANCE_THRESHOLD", "0.90"))
+DISTANCE_THRESHOLD = float(os.getenv("LLMASSISTANT_DISTANCE_THRESHOLD", "0.93"))
 
 ALPHA_VEC = float(os.getenv("LLMASSISTANT_RERANK_ALPHA", "0.55"))  # vector
 BETA_LEX  = float(os.getenv("LLMASSISTANT_RERANK_BETA", "0.45"))   # lexical
@@ -68,7 +68,8 @@ PRIORITY_SOURCES = [
     if s.strip()
 ]
 SOURCE_BONUS = float(os.getenv("LLMASSISTANT_SOURCE_BONUS", "0.10"))
-MIN_PRIORITY_CHUNKS = int(os.getenv("LLMASSISTANT_MIN_PRIORITY_CHUNKS", "3"))
+PRIORITY_RATIO = float(os.getenv("LLMASSISTANT_PRIORITY_RATIO", "0.4"))
+MIN_PRIORITY_CHUNKS = 2  # safety floor
 
 # For contacts/admin questions: boost chunks with real teacher/contact labels, penalize example datasets
 CONTACT_LABEL_BONUS = float(os.getenv("LLMASSISTANT_CONTACT_LABEL_BONUS", "0.25"))
@@ -369,24 +370,29 @@ def format_sources(source_map):
     return output
 
 def score_answer_support(answer: str, source_map: list):
-    sentences = re.split(r"[.!?]\s+", answer)
-    embs = [embed(s) for s in sentences if s.strip()]
-
-    if not embs:
-        return []
-
-    answer_emb = np.mean(embs, axis=0)
+    sentences = [s.strip() for s in re.split(r"[.!?]\s+", answer) if len(s.strip()) > 20]
 
     scored = []
 
     for item in source_map:
         chunk_emb = item.get("embedding")
-        if chunk_emb is None or len(chunk_emb) == 0:
+        if chunk_emb is None:
             continue
 
-        sim = cosine_similarity(answer_emb, chunk_emb)
+        max_sim = 0.0
 
-        scored.append((item, sim))
+        sentence_embs = [embed(s) for s in sentences]
+        for item in source_map:
+            chunk_emb = item.get("embedding")
+            if chunk_emb is None:
+                continue
+
+            max_sim = max(
+                cosine_similarity(sent_emb, chunk_emb)
+                for sent_emb in sentence_embs
+            )
+
+        scored.append((item, max_sim))
 
     return sorted(scored, key=lambda x: -x[1])
 
@@ -399,11 +405,17 @@ def cosine_similarity(a, b):
     b = np.array(b)
     return float(np.dot(a, b) / (np.linalg.norm(a) * np.linalg.norm(b) + 1e-9))
 
-def is_contacts_or_admin(q: str) -> bool:
+def is_contacts_question(q: str) -> bool:
     ql = (q or "").lower()
     return any(k in ql for k in [
-        "who","teacher","teachers","lecturer","instructor","professor",
-        "email","contact","office","hours","grading","assessment","deadline","due","exam","policy","criteria","rule"
+        "teacher","teachers","lecturer","instructor","professor",
+        "email","contact","office hours"
+    ])
+    
+def is_policy_question(q: str) -> bool:
+    ql = (q or "").lower()
+    return any(k in ql for k in [
+        "grading policy","grade","assessment","exam","criteria","rules"
     ])
 
 
@@ -453,7 +465,13 @@ def ask(data: Query):
     all_dists = results.get("distances") or []
 
     q_mix = " ".join([x for x in [q, q_kw, q2] if x]).strip()
-    want_contacts = is_contacts_or_admin(q)
+    want_contacts = is_contacts_question(q)
+    want_policy = is_policy_question(q)
+    
+    if want_contacts:
+        MAX_CHUNKS_LOCAL = 8
+    else:
+        MAX_CHUNKS_LOCAL = MAX_CHUNKS
 
     merged = {}
     seen_sources = []
@@ -517,7 +535,8 @@ def ask(data: Query):
     candidates.sort(key=lambda x: (-x[3], x[2]))
     best_dist = min([c[2] for c in candidates]) if candidates else None
 
-    if best_dist is not None and best_dist > DISTANCE_THRESHOLD:
+    if best_dist > DISTANCE_THRESHOLD:
+        candidates = candidates[:10]
         resp = {"answer": "The provided PDFs do not contain this information.", "sources": []}
         if DEBUG:
             resp["debug"] = {
@@ -537,7 +556,16 @@ def ask(data: Query):
     used = set()
 
     # 1) Priority source selection
-    priority_candidates = [c for c in candidates if ((c[1] or {}).get("source", "") in PRIORITY_SOURCES)]
+    priority_candidates = [
+        c for c in candidates
+        if ((c[1] or {}).get("source", "") in PRIORITY_SOURCES)
+    ]
+
+    priority_limit = max(
+        MIN_PRIORITY_CHUNKS,
+        int(MAX_CHUNKS_LOCAL * PRIORITY_RATIO)
+    )
+
     if priority_candidates:
         if want_contacts:
             def priority_rank(c):
@@ -549,11 +577,12 @@ def ask(data: Query):
                 if EXAMPLE_EMAIL_RE.search(doc): hits -= 2
                 if EXERCISE_TABLE_RE.search(doc): hits -= 1
                 return (-hits, -c[3], c[2])
+
             priority_candidates.sort(key=priority_rank)
         else:
             priority_candidates.sort(key=lambda x: (-x[3], x[2]))
 
-        for c in priority_candidates[:MIN_PRIORITY_CHUNKS]:
+        for c in priority_candidates[:priority_limit]:
             k = doc_key(c[0], c[1])
             if k not in used:
                 top.append(c)
@@ -576,7 +605,7 @@ def ask(data: Query):
     diverse.sort(key=lambda x: (-x[3], x[2]))
 
     for c in diverse:
-        if len(top) >= MAX_CHUNKS:
+        if len(top) >= MAX_CHUNKS_LOCAL:
             break
         k = doc_key(c[0], c[1])
         if k not in used:
@@ -598,9 +627,24 @@ QUESTION:
 You MUST:
 - Extract ALL relevant information from ALL parts of the CONTEXT.
 - Do NOT stop after finding the first answer.
-- If multiple bullet points or rules exist, include ALL of them.
-- Combine information across multiple chunks when necessary.
-- Missing any relevant rule is considered an incomplete answer.
+- If multiple items exist (e.g., multiple teachers, emails, rules), list ALL of them.
+- Cross-check multiple chunks before answering.
+- Prefer completeness over brevity.
+
+- Each statement in your answer MUST be grounded in the CONTEXT.
+- Do NOT include information that is not explicitly supported.
+
+- If the answer involves a list:
+  - Scan the ENTIRE context
+  - Aggregate ALL items
+  - Deduplicate
+  
+- Treat each [SOURCE_ID: Sx|...] as a verifiable evidence unit.
+- When answering, ensure every statement is supported by at least one SOURCE_ID.
+- Prefer grouping information by SOURCE_ID when multiple facts come from the same chunk.
+- Do not mix unsupported facts across chunks.
+
+Missing relevant items = incorrect answer.
 
 ANSWER:
 """
@@ -618,7 +662,16 @@ ANSWER:
 
     scored = score_answer_support(answer, used_sources)
 
-    filtered = [s[0] for s in scored if s[1] > 0.25]  # threshold ajustável
+    MIN_CONTENT_LENGTH = 40
+
+    scored = [
+        (item, sim)
+        for (item, sim) in scored
+        if len(item.get("content", "")) >= MIN_CONTENT_LENGTH
+    ]
+
+    top_k = 3
+    filtered = [s[0] for s in scored[:top_k]]
 
     final_sources = format_sources(filtered)
 
