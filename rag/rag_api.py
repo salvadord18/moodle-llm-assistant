@@ -67,8 +67,8 @@ PRIORITY_SOURCES = [
     s.strip() for s in os.getenv("LLMASSISTANT_PRIORITY_SOURCES", "Lecture1.pdf").split(",")
     if s.strip()
 ]
-SOURCE_BONUS = float(os.getenv("LLMASSISTANT_SOURCE_BONUS", "0.10"))
-PRIORITY_RATIO = float(os.getenv("LLMASSISTANT_PRIORITY_RATIO", "0.4"))
+SOURCE_BONUS = float(os.getenv("LLMASSISTANT_SOURCE_BONUS", "0.25"))
+PRIORITY_RATIO = float(os.getenv("LLMASSISTANT_PRIORITY_RATIO", "0.5"))
 MIN_PRIORITY_CHUNKS = 2  # safety floor
 
 # For contacts/admin questions: boost chunks with real teacher/contact labels, penalize example datasets
@@ -314,7 +314,6 @@ def pack_context(ranked_items, query_text: str):
             "page": page,
             "chunk_index": chunk_index,
             "content": d2.lower(),
-            "embedding": embed(d2.lower())
         })
 
         total += len(block)
@@ -358,7 +357,8 @@ def format_sources(source_map):
             grouped[src] = []
 
         if page is not None:
-            grouped[src].append(page)
+            if isinstance(page, int) or (isinstance(page, str) and page.isdigit()):
+                grouped[src].append(int(page))
 
     output = []
     for src, pages in grouped.items():
@@ -369,41 +369,36 @@ def format_sources(source_map):
 
     return output
 
-def score_answer_support(answer: str, source_map: list):
-    sentences = [s.strip() for s in re.split(r"[.!?]\s+", answer) if len(s.strip()) > 20]
-
+def simple_source_ranking(answer: str, query: str, source_map: list):
+    answer_tokens = tokenize(answer)
+    query_tokens = tokenize(query)
+    
     scored = []
-
+    
     for item in source_map:
-        chunk_emb = item.get("embedding")
-        if chunk_emb is None:
+        content = item.get("content", "")
+        content_tokens = tokenize(content)
+        
+        if not content_tokens:
             continue
-
-        max_sim = 0.0
-
-        sentence_embs = [embed(s) for s in sentences]
-        for item in source_map:
-            chunk_emb = item.get("embedding")
-            if chunk_emb is None:
-                continue
-
-            max_sim = max(
-                cosine_similarity(sent_emb, chunk_emb)
-                for sent_emb in sentence_embs
-            )
-
-        scored.append((item, max_sim))
-
+        
+        overlap_answer = len(answer_tokens & content_tokens)
+        overlap_query = len(query_tokens & content_tokens)
+        
+        den = max(len(content_tokens), 20)
+        
+        # normalização pelo tamanho do chunk
+        norm_answer = overlap_answer / den
+        norm_query = overlap_query / den
+        
+        score = (
+            0.7 * norm_answer +
+            0.3 * norm_query
+        )
+        
+        scored.append((item, score))
+    
     return sorted(scored, key=lambda x: -x[1])
-
-def embed(text: str):
-    """Uses the same embedding function as Chroma"""
-    return embedding_fn([text])[0]
-
-def cosine_similarity(a, b):
-    a = np.array(a)
-    b = np.array(b)
-    return float(np.dot(a, b) / (np.linalg.norm(a) * np.linalg.norm(b) + 1e-9))
 
 def is_contacts_question(q: str) -> bool:
     ql = (q or "").lower()
@@ -417,7 +412,11 @@ def is_policy_question(q: str) -> bool:
     return any(k in ql for k in [
         "grading policy","grade","assessment","exam","criteria","rules"
     ])
-
+    
+def is_priority_source(src: str) -> bool:
+    if not src:
+        return False
+    return any(src.strip().lower() == p.lower() for p in PRIORITY_SOURCES)
 
 # -----------------------------
 # ROUTES
@@ -474,7 +473,7 @@ def ask(data: Query):
         MAX_CHUNKS_LOCAL = MAX_CHUNKS
 
     merged = {}
-    seen_sources = []
+    seen_sources = set()
 
     for qi in range(len(queries)):
         docs_i = all_docs[qi] if qi < len(all_docs) else []
@@ -490,9 +489,12 @@ def ask(data: Query):
             vec_sim = max(0.0, 1.0 - dist)
             score = ALPHA_VEC * vec_sim + BETA_LEX * lex
 
+            # Strong canonical boost for priority sources
             src = (meta or {}).get("source", "")
-            if src in PRIORITY_SOURCES:
-                score += SOURCE_BONUS
+            if want_policy and is_priority_source(src):
+                score += 0.3
+            if is_priority_source(src):
+                score += SOURCE_BONUS * 2
 
             if want_contacts:
                 teacher_label = bool(TEACHER_LABEL_RE.search(doc))
@@ -523,7 +525,7 @@ def ask(data: Query):
                     merged[k] = (doc, meta, dist, score)
 
             if src:
-                seen_sources.append(src)
+                seen_sources.add(src)
 
     candidates = list(merged.values())
     if not candidates:
@@ -543,7 +545,7 @@ def ask(data: Query):
                 "min_dist": best_dist,
                 "threshold": DISTANCE_THRESHOLD,
                 "queries": queries,
-                "top_sources": list(dict.fromkeys(seen_sources))[:10]
+                "top_sources": sorted(seen_sources)[:10]
             }
         return resp
 
@@ -558,7 +560,7 @@ def ask(data: Query):
     # 1) Priority source selection
     priority_candidates = [
         c for c in candidates
-        if ((c[1] or {}).get("source", "") in PRIORITY_SOURCES)
+        if is_priority_source((c[1] or {}).get("source", ""))
     ]
 
     priority_limit = max(
@@ -644,6 +646,9 @@ You MUST:
 - Prefer grouping information by SOURCE_ID when multiple facts come from the same chunk.
 - Do not mix unsupported facts across chunks.
 
+- Do NOT combine rules from different documents unless explicitly stated.
+- If grading policy is found in multiple sources, prefer the earliest lecture ("Lecture1.pdf" for example).
+
 Missing relevant items = incorrect answer.
 
 ANSWER:
@@ -660,7 +665,7 @@ ANSWER:
     if not answer:
         return {"answer": "Error: empty response from model."}
 
-    scored = score_answer_support(answer, used_sources)
+    scored = simple_source_ranking(answer, q, used_sources)
 
     MIN_CONTENT_LENGTH = 40
 
@@ -670,10 +675,7 @@ ANSWER:
         if len(item.get("content", "")) >= MIN_CONTENT_LENGTH
     ]
 
-    top_k = 3
-    filtered = [s[0] for s in scored[:top_k]]
-
-    final_sources = format_sources(filtered)
+    final_sources = format_sources([s[0] for s in scored[:3]])
 
     resp = {"answer": answer, "sources": final_sources}
     
