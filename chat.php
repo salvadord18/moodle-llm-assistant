@@ -44,8 +44,17 @@ echo $OUTPUT->header();
                 id="llm_clear"
                 title="Clear conversation"
                 aria-label="Clear conversation">
-          <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-            <path d="M20 20H7L3 16l9-9a2.8 2.8 0 0 1 4 0l5 5a2.8 2.8 0 0 1 0 4l-4 4Z"/>
+          <svg
+            viewBox="0 0 24 24"
+            width="18"
+            height="18"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="2"
+            stroke-linecap="round"
+            stroke-linejoin="round"
+            aria-hidden="true">
+            <path d="M20 20H7.5a2 2 0 0 1-1.4-.6l-3.5-3.5a2 2 0 0 1 0-2.8l8.6-8.6a2 2 0 0 1 2.8 0l5 5a2 2 0 0 1 0 2.8L12 20"/>
             <path d="M6 13l5 5"/>
           </svg>
         </button>
