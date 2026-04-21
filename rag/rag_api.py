@@ -126,6 +126,25 @@ EXERCISE_TABLE_RE = re.compile(
     re.IGNORECASE
 )
 
+FOLLOWUP_RE = re.compile(
+    r"\b(other|another|else|more|isn['’]?t|isnt|what about|and their|and the|those|them)\b",
+    re.IGNORECASE
+)
+
+TOPIC_RE = re.compile(
+    r"\b(teacher|teachers|lecturer|instructor|professor|email|contact|contacts|assessment|deadline|exam|grade|grading|dbms|sql|thesis|supervisor)\b",
+    re.IGNORECASE
+)
+
+ENTITY_FOLLOWUP_RE = re.compile(
+    r"^\s*(who is|what about|and who is|and what about)\b",
+    re.IGNORECASE
+)
+
+PERSON_NAME_RE = re.compile(
+    r"\b[A-ZÀ-Ý][a-zà-ÿ]+(?:[\s-]+[A-ZÀ-Ý][a-zà-ÿ]+){1,3}\b"
+)
+
 DB_PREFIX = os.getenv("MOODLE_DB_PREFIX", "m_")
 
 DB = {
@@ -621,10 +640,136 @@ def chunk_has_contact_payload(doc: str) -> bool:
         or ("email:" in doc.lower())
     )
 
-
 def source_map_has_contact_payload(source_map: list[dict]) -> bool:
     for item in source_map:
         if chunk_has_contact_payload(item.get("content", "")):
+            return True
+    return False
+
+def expand_same_page_siblings(collection, ranked_items, max_extra=8):
+    expanded = list(ranked_items)
+    seen = {doc_key(d, m) for d, m, _, _ in ranked_items}
+
+    for doc, meta, dist, score in ranked_items:
+        src = (meta or {}).get("source")
+        page = safe_int((meta or {}).get("page"))
+
+        if not src or page is None:
+            continue
+
+        if contact_chunk_quality(doc, meta) <= 0.10:
+            continue
+
+        try:
+            siblings = collection.get(
+                where={"source": src},
+                include=["documents", "metadatas"]
+            )
+        except Exception:
+            continue
+
+        docs = siblings.get("documents") or []
+        metas = siblings.get("metadatas") or []
+
+        for d, m in zip(docs, metas):
+            if safe_int((m or {}).get("page")) != page:
+                continue
+
+            k = doc_key(d, m)
+            if k in seen:
+                continue
+
+            expanded.append((d, m, dist, score - 0.02))
+            seen.add(k)
+
+            if len(expanded) >= len(ranked_items) + max_extra:
+                return expanded
+
+    return expanded
+
+def build_retrieval_query(question: str, history: list[dict]) -> str:
+    """
+    Make retrieval history-aware only for genuinely ambiguous follow-up questions.
+    Handles cases like:
+    - "Isn't there any other teacher?"
+    - "And their emails?"
+    - "Who is Yuri?"
+    But does NOT rewrite complete standalone questions.
+    """
+    q = (question or "").strip()
+    if not q or not history:
+        return q
+
+    q_tokens = tokenize(q)
+    has_explicit_topic = bool(TOPIC_RE.search(q))
+    is_short_ambiguous = len(q_tokens) <= 6 and not has_explicit_topic
+    is_followup = bool(FOLLOWUP_RE.search(q))
+    is_entity_followup = bool(ENTITY_FOLLOWUP_RE.search(q))
+
+    if not (is_followup or is_short_ambiguous or is_entity_followup):
+        return q
+
+    previous_user_messages = [
+        (turn.get("message") or "").strip()
+        for turn in history
+        if (turn.get("role") == "user" and (turn.get("message") or "").strip())
+    ]
+
+    if not previous_user_messages:
+        return q
+
+    previous_user = previous_user_messages[-1]
+    return f"{previous_user} {q}".strip()
+
+def extract_known_contact_entities(history: list[dict]):
+    known_emails = set()
+    known_names = set()
+
+    for turn in history[-6:]:
+        if (turn.get("role") or "") != "assistant":
+            continue
+
+        text = (turn.get("message") or "").strip()
+        if not text:
+            continue
+
+        for email in EMAIL_RE.findall(text):
+            known_emails.add(email.lower())
+
+        for name in PERSON_NAME_RE.findall(text):
+            known_names.add(normalize_compare(name))
+
+    return known_names, known_emails
+
+def contact_novelty_bonus(doc: str, known_names: set, known_emails: set) -> float:
+    doc = doc or ""
+
+    doc_emails = {e.lower() for e in EMAIL_RE.findall(doc)}
+    doc_names = {normalize_compare(n) for n in PERSON_NAME_RE.findall(doc)}
+
+    new_emails = doc_emails - known_emails
+    new_names = doc_names - known_names
+
+    score = 0.0
+
+    if new_emails:
+        score += 0.60 * len(new_emails)
+
+    if new_names:
+        score += 0.40 * len(new_names)
+
+    # Penalize chunks that only repeat already known people/emails
+    if (doc_emails & known_emails or doc_names & known_names) and not (new_emails or new_names):
+        score -= 0.35
+
+    return score
+
+def is_additive_followup(q: str) -> bool:
+    return bool(FOLLOWUP_RE.search(q or ""))
+
+def source_map_has_new_contact_payload(source_map: list[dict], known_names: set, known_emails: set) -> bool:
+    for item in source_map:
+        if contact_novelty_bonus(item.get("content", ""), known_names, known_emails) > 0:
             return True
     return False
 
@@ -636,6 +781,8 @@ def ask(data: Query):
     q = (data.question or "").strip()
     if not q:
         return {"answer": "Please enter a question.", "sources": []}
+
+    q_for_retrieval = build_retrieval_query(q, data.history)
 
     is_global_scope = (data.courseid == 0)
 
@@ -662,16 +809,19 @@ def ask(data: Query):
             }
         return resp
 
-    queries = [q]
-    q_kw = build_keyword_query(q)
-    if q_kw and q_kw.lower() != q.lower():
+    queries = [q_for_retrieval]
+
+    q_kw = build_keyword_query(q_for_retrieval)
+    if q_kw and q_kw.lower() != q_for_retrieval.lower():
         queries.append(q_kw)
 
     q2 = ""
     if ENABLE_QUERY_REWRITE:
-        q2 = ollama_rewrite_query(q)
+        q2 = ollama_rewrite_query(q_for_retrieval)
         if q2 and q2.lower() not in [x.lower() for x in queries]:
             queries.append(q2)
+
+    q_mix = " ".join([x for x in [q_for_retrieval, q_kw, q2] if x]).strip()
 
     try:
         results = collection.query(
@@ -689,9 +839,11 @@ def ask(data: Query):
     all_metas = results.get("metadatas") or []
     all_dists = results.get("distances") or []
 
-    q_mix = " ".join([x for x in [q, q_kw, q2] if x]).strip()
-    want_contacts = is_contacts_question(q)
-    want_policy = is_policy_question(q)
+    want_contacts = is_contacts_question(q_for_retrieval)
+    want_policy = is_policy_question(q_for_retrieval)
+    
+    additive_followup = want_contacts and is_additive_followup(q)
+    known_names, known_emails = extract_known_contact_entities(data.history) if want_contacts else (set(), set())
     
     if want_contacts:
         MAX_CHUNKS_LOCAL = 8
@@ -730,9 +882,11 @@ def ask(data: Query):
             if want_contacts:
                 score += contact_chunk_quality(doc, meta)
 
-                # Bare email chunks are less useful than structured role/name/email chunks
                 if EMAIL_RE.search(doc) and not TEACHER_LABEL_RE.search(doc):
                     score -= 0.05
+                    
+                if additive_followup:
+                    score += contact_novelty_bonus(doc, known_names, known_emails)
 
             # Canonical priority-source boosts
             if want_policy and is_priority_source(src):
@@ -753,27 +907,27 @@ def ask(data: Query):
             if src:
                 seen_sources.add(src)
 
-        candidates = list(merged.values())
+    candidates = list(merged.values())
 
-        if want_contacts:
-            filtered_candidates = [
-                c for c in candidates
-                if contact_chunk_quality(c[0], c[1]) > 0.10
-            ]
-            if filtered_candidates:
-                candidates = filtered_candidates
+    if want_contacts:
+        filtered_candidates = [
+            c for c in candidates
+            if contact_chunk_quality(c[0], c[1]) > 0.10
+        ]
+        if filtered_candidates:
+            candidates = filtered_candidates
 
-        if not candidates:
-            resp = {"answer": "The provided PDFs do not contain this information.", "sources": []}
-            if DEBUG:
-                resp["debug"] = {
-                    "return_stage": "no_candidates",
-                    "requested_courseid": data.courseid,
-                    "source_courseid": source_courseid,
-                    "collection_name": collection_name,
-                    "queries": queries
-                }
-            return resp
+    if not candidates:
+        resp = {"answer": "The provided PDFs do not contain this information.", "sources": []}
+        if DEBUG:
+            resp["debug"] = {
+                "return_stage": "no_candidates",
+                "requested_courseid": data.courseid,
+                "source_courseid": source_courseid,
+                "collection_name": collection_name,
+                "queries": queries
+            }
+        return resp
 
     candidates.sort(key=lambda x: (-x[3], x[2]))
     best_dist = min([c[2] for c in candidates]) if candidates else None
@@ -821,14 +975,25 @@ def ask(data: Query):
     if priority_candidates:
         if want_contacts:
             def priority_rank(c):
-                doc = c[0] or ""
+                doc, meta, dist, score = c
+                doc = doc or ""
                 hits = 0
-                if TEACHER_LABEL_RE.search(doc): hits += 2
-                if NOV_AFFIL_EMAIL_RE.search(doc): hits += 2
-                if EMAIL_RE.search(doc): hits += 1
-                if EXAMPLE_EMAIL_RE.search(doc): hits -= 2
-                if EXERCISE_TABLE_RE.search(doc): hits -= 1
-                return (-hits, -c[3], c[2])
+
+                if TEACHER_LABEL_RE.search(doc):
+                    hits += 2
+                if NOV_AFFIL_EMAIL_RE.search(doc):
+                    hits += 2
+                if EMAIL_RE.search(doc):
+                    hits += 1
+                if EXAMPLE_EMAIL_RE.search(doc):
+                    hits -= 2
+                if EXERCISE_TABLE_RE.search(doc):
+                    hits -= 1
+
+                if additive_followup:
+                    hits += int(contact_novelty_bonus(doc, known_names, known_emails) * 10)
+
+                return (-hits, -score, dist)
 
             priority_candidates.sort(key=priority_rank)
         else:
@@ -882,33 +1047,61 @@ def ask(data: Query):
         if k not in used:
             top.append(c)
             used.add(k)
+            
+    if want_contacts:
+        top = expand_same_page_siblings(collection, top, max_extra=6)
 
-        context, used_sources = pack_context(
-            top,
-            q_mix,
-            mode="contacts" if want_contacts else "generic"
-        )
+    context, used_sources = pack_context(
+        top,
+        q_mix,
+        mode="contacts" if want_contacts else "generic"
+    )
 
-        if want_contacts and not source_map_has_contact_payload(used_sources):
-            fallback_top = [
-                c for c in candidates
-                if chunk_has_contact_payload(c[0])
-            ]
-            fallback_top.sort(key=lambda x: (-x[3], x[2]))
-            fallback_top = fallback_top[:6]
+    if want_contacts and additive_followup and not source_map_has_new_contact_payload(used_sources, known_names, known_emails):
+        fallback_top = [
+            c for c in candidates
+            if contact_novelty_bonus(c[0], known_names, known_emails) > 0
+        ]
+        fallback_top.sort(key=lambda x: (-(x[3] + contact_novelty_bonus(x[0], known_names, known_emails)), x[2]))
+        fallback_top = fallback_top[:6]
 
-            if fallback_top:
-                context, used_sources = pack_context(
-                    fallback_top,
-                    q_mix,
-                    mode="contacts"
-                )
+        if fallback_top:
+            fallback_top = expand_same_page_siblings(collection, fallback_top, max_extra=8)
+
+            context, used_sources = pack_context(
+                fallback_top,
+                q_mix,
+                mode="contacts"
+            )
+
+    elif want_contacts and not source_map_has_contact_payload(used_sources):
+        fallback_top = [
+            c for c in candidates
+            if contact_chunk_quality(c[0], c[1]) > 0.10
+        ]
+        fallback_top.sort(key=lambda x: (-x[3], x[2]))
+        fallback_top = fallback_top[:6]
+
+        if fallback_top:
+            fallback_top = expand_same_page_siblings(collection, fallback_top, max_extra=8)
+
+            context, used_sources = pack_context(
+                fallback_top,
+                q_mix,
+                mode="contacts"
+            )
     history_block = build_history_block(data.history)
     system_prompt = build_system_prompt(0 if is_global_scope else data.courseid)
+    
+    already_mentioned_block = ""
+    if want_contacts and known_names:
+        already_mentioned_block = "ALREADY_MENTIONED_IN_CHAT:\n" + "\n".join(
+            f"- {name}" for name in sorted(known_names)
+        ) + "\n\n"
 
     prompt = f"""{system_prompt}
 
-{history_block}CONTEXT:
+{already_mentioned_block}{history_block}CONTEXT:
 {context}
 
 QUESTION:
@@ -922,6 +1115,9 @@ Instructions:
 - Prefer completeness and usefulness over unnecessary brevity.
 - Do not invent facts that are not supported by the CONTEXT.
 - Do not mention SOURCE_IDs inside the main body of the answer.
+- If the user is asking for additional or other people/items, do not simply repeat previously mentioned items unless needed for clarity.
+- In that case, look for additional supported items not already mentioned in the chat.
+- If no additional supported items exist in the CONTEXT, say so clearly.
 
 Source handling:
 - Treat each [SOURCE_ID: Sx|...] as a valid evidence unit.
