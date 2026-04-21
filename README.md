@@ -296,6 +296,10 @@ chmod +x ~/dev/moodle-lab/restart_rag.sh
 cd ~/dev/moodle-lab/moodle-docker
 bin/moodle-docker-compose exec webserver bash -lc "python3 /rag_ingest_moodle.py"
 
+# Ingestion with reset:
+cd /var/www/html/blocks/llmassistant/rag
+RESET_COLLECTION=true python3 /rag_ingest_moodle.py
+
 TARGET_COURSE_ID=2 RESET_COLLECTION=true python3 /rag_ingest_moodle.py
 
 
