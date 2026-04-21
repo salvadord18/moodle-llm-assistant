@@ -324,6 +324,9 @@ bin/moodle-docker-compose exec webserver bash
 cd /var/www/html/blocks/llmassistant/rag
 uvicorn rag_api:app --host 0.0.0.0 --port 8001
 
+# DEBUG MODE:
+LLMASSISTANT_DEBUG=1 uvicorn rag_api:app --host 0.0.0.0 --port 8001
+
 # TESTING A QUESTION IN THE TERMINAL
 curl -s -X POST http://127.0.0.1:8001/ask \
   -H 'Content-Type: application/json' \
