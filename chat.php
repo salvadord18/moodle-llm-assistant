@@ -263,7 +263,21 @@ echo $OUTPUT->header();
     }
   }
 
-  clearBtn.addEventListener("click", clearHistory);
+  async function confirmClearHistory() {
+    const ok = window.confirm("Are you sure you want to clear this chat?");
+    if (!ok) {
+      return;
+    }
+
+    clearBtn.disabled = true;
+    try {
+      await clearHistory();
+    } finally {
+      clearBtn.disabled = false;
+    }
+  }
+
+  clearBtn.addEventListener("click", confirmClearHistory);
   sendBtn.addEventListener("click", sendMessage);
 
   input.addEventListener("keydown", function(e) {

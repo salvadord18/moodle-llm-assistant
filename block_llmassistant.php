@@ -105,6 +105,7 @@ class block_llmassistant extends block_base {
         $labelsources = 'Sources:';
         $labelwelcome_course = 'Hi! Ask me something about this course.';
         $labelwelcome_global = 'Hi! Ask me about academic regulations, deadlines and faculty rules.';
+        $labelclearconfirm = 'Are you sure you want to clear this chat?';
 
         $apiurl_js = json_encode($apiurl, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
         $historyurl_js = json_encode($historyurl, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
@@ -117,6 +118,7 @@ class block_llmassistant extends block_base {
 
         $labelsources_js = json_encode($labelsources, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
         $labelthinking_js = json_encode($labelthinking, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
+        $labelclearconfirm_js = json_encode($labelclearconfirm, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
 
         $this->content->text = <<<HTML
 <div id="llm_chat_{$uid}" class="llm-chat-container">
@@ -200,6 +202,7 @@ class block_llmassistant extends block_base {
   const welcomeMsg = {$welcome_js};
   const labelSources = {$labelsources_js};
   const labelThinking = {$labelthinking_js};
+  const labelClearConfirm = {$labelclearconfirm_js};
 
   const chatWindow = document.getElementById("llm_chat_window_{$uid}");
   const sendBtn = document.getElementById("llm_send_{$uid}");
@@ -378,8 +381,22 @@ class block_llmassistant extends block_base {
     }
   }
 
+  async function confirmClearHistory() {
+    const ok = window.confirm(labelClearConfirm);
+    if (!ok) {
+      return;
+    }
+
+    clearBtn.disabled = true;
+    try {
+      await clearHistory();
+    } finally {
+      clearBtn.disabled = false;
+    }
+  }
+
   openBtn.addEventListener("click", function() { window.location.href = openUrl; });
-  clearBtn.addEventListener("click", clearHistory);
+  clearBtn.addEventListener("click", confirmClearHistory);
   sendBtn.addEventListener("click", sendMessage);
 
   input.addEventListener("keydown", function(e) {
