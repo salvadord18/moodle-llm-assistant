@@ -271,7 +271,7 @@ class block_llmassistant extends block_base {
 
           let href = M.cfg.wwwroot + "/blocks/llmassistant/source_file.php/"
             + encodeURIComponent(filename)
-            + "?courseid=" + encodeURIComponent(courseId)
+            + "?courseid=" + encodeURIComponent(scopeCourseId)
             + "&source=" + encodeURIComponent(filename);
 
           if (page) {
