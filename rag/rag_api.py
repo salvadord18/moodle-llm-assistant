@@ -23,7 +23,6 @@ import re
 import time
 import hashlib
 import requests
-import numpy as np
 import unicodedata
 from functools import lru_cache
 import psycopg2
@@ -81,7 +80,6 @@ PRIORITY_RATIO = float(os.getenv("LLMASSISTANT_PRIORITY_RATIO", "0.5"))
 MIN_PRIORITY_CHUNKS = 2  # safety floor
 
 # For contacts/admin questions: boost chunks with real teacher/contact labels, penalize example datasets
-CONTACT_LABEL_BONUS = float(os.getenv("LLMASSISTANT_CONTACT_LABEL_BONUS", "0.25"))
 EXAMPLE_PENALTY_EMAIL = float(os.getenv("LLMASSISTANT_EXAMPLE_EMAIL_PENALTY", "0.30"))
 EXAMPLE_PENALTY_TABLE = float(os.getenv("LLMASSISTANT_EXERCISE_TABLE_PENALTY", "0.20"))
 
@@ -123,6 +121,25 @@ TEACHING_EXAMPLE_RE = re.compile(r"\bstudent[-\s]?teacher\b", re.IGNORECASE)
 EXAMPLE_EMAIL_RE = re.compile(r"\b(example\.com|mailinator\.com|fakemail\.com)\b", re.IGNORECASE)
 EXERCISE_TABLE_RE = re.compile(
     r"\b(order_id|customer email|functional dependencies|shipping department|patients? appointment|bill|payment)\b",
+    re.IGNORECASE
+)
+
+SPECIAL_EXAM_RE = re.compile(r"\b(época especial|epoca especial)\b", re.IGNORECASE)
+RESIT_EXAM_RE = re.compile(r"\b(época de recurso|epoca de recurso|recurso|melhoria)\b", re.IGNORECASE)
+ACCESS_CUE_RE = re.compile(
+    r"\b(t[êe]m acesso|podem ter acesso|pode(m)? inscrever[- ]se|t[êe]m direito|s[aã]o eleg[ií]veis)\b",
+    re.IGNORECASE
+)
+PERIOD_SCOPE_RE = re.compile(
+    r"\b(destina[- ]se|per[ií]odo de)\b",
+    re.IGNORECASE
+)
+ELIGIBILITY_QUESTION_RE = re.compile(
+    r"\b(quem pode|quem se pode|quem tem acesso|t[eê]m acesso|who can|who may|eligibility|eligible|access to)\b",
+    re.IGNORECASE
+)
+PROCEDURAL_POLICY_RE = re.compile(
+    r"\b(inscri[cç][aã]o em exames|portal acad[eé]mico|prazos|impresso|calend[aá]rio escolar|inscri[cç][aã]o)\b",
     re.IGNORECASE
 )
 
@@ -286,8 +303,7 @@ def ollama_generate(prompt: str) -> str:
 
     raise RuntimeError(f"Ollama generate failed: {last_err}")
 
-
-def ollama_rewrite_query(q: str) -> str:
+def ollama_rewrite_query_course(q: str) -> str:
     rewrite_prompt = (
         "Rewrite the user question into a search query for lecture PDFs. "
         "Add synonyms AND common document labels used in slides (e.g., Lecturer, Instructor, Professor, Email, Contact, Assessment, Deadline, Exam). "
@@ -308,7 +324,28 @@ def ollama_rewrite_query(q: str) -> str:
         return out.splitlines()[0].strip() if out else ""
     except Exception:
         return ""
-
+    
+def ollama_rewrite_query_global(q: str) -> str:
+    rewrite_prompt = (
+        "Rewrite the user question into a search query for institutional regulations, rules, procedures and official PDFs. "
+        "Add relevant legal/administrative terms such as regulation, rule, procedure, eligibility, access, deadline, registration, exam, special exam, academic services. "
+        "Keep it short. Return ONE line only.\n\n"
+        f"Question: {q}\n"
+        "Search query:"
+    )
+    payload = {
+        "model": LLM_MODEL,
+        "prompt": rewrite_prompt,
+        "stream": False,
+        "options": {"temperature": 0.0, "num_ctx": 1024}
+    }
+    try:
+        r = _session.post(OLLAMA_GEN_URL, json=payload, timeout=(5, 60))
+        r.raise_for_status()
+        out = (r.json().get("response") or "").strip()
+        return out.splitlines()[0].strip() if out else ""
+    except Exception:
+        return ""
 
 def tokenize(text: str):
     text = (text or "").lower()
@@ -511,7 +548,7 @@ def format_sources(source_map):
 
     return output
 
-USED_SOURCES_RE = re.compile(r"(?im)^USED_SOURCES:\s*(.+?)\s*$")
+USED_SOURCES_RE = re.compile(r"(?im)^USED[\s_-]?SOURCES:\s*(.+?)\s*$")
 
 def extract_used_source_ids(answer: str, source_map: list[dict]):
     """
@@ -553,6 +590,48 @@ def build_sources_from_ids(source_ids: list[str], source_map: list[dict]):
     selected = [by_id[sid] for sid in source_ids if sid in by_id]
     return format_sources(selected)
 
+def no_info_text(is_global_scope: bool) -> str:
+    return (
+        "The provided global documents do not contain this information."
+        if is_global_scope
+        else "The provided PDFs do not contain this information."
+    )
+
+
+def simple_source_ranking(answer: str, query: str, source_map: list[dict]):
+    """
+    Rank source chunks heuristically using overlap with:
+    - the final answer
+    - the original user query
+    This is used as a fallback when the model forgets to output USED_SOURCES.
+    """
+    answer_tokens = tokenize(answer)
+    query_tokens = tokenize(query)
+
+    scored = []
+
+    for item in source_map:
+        content = item.get("content", "")
+        content_tokens = tokenize(content)
+
+        if not content_tokens:
+            continue
+
+        overlap_answer = len(answer_tokens & content_tokens)
+        overlap_query = len(query_tokens & content_tokens)
+
+        # small normalization to avoid favouring huge chunks too much
+        denom = max(len(content_tokens), 20)
+
+        norm_answer = overlap_answer / denom
+        norm_query = overlap_query / denom
+
+        score = (0.7 * norm_answer) + (0.3 * norm_query)
+        scored.append((item, score))
+
+    scored.sort(key=lambda x: -x[1])
+    return scored
+
 def is_contacts_question(q: str) -> bool:
     ql = (q or "").lower()
     return any(k in ql for k in [
@@ -565,13 +644,47 @@ def is_contacts_question(q: str) -> bool:
 def is_policy_question(q: str) -> bool:
     ql = (q or "").lower()
     return any(k in ql for k in [
-        "grading policy","grade","assessment","exam","criteria","rules"
+        # English
+        "grading policy", "grade", "assessment", "exam", "criteria", "rules",
+        "regulation", "regulations", "procedure", "procedures", "deadline", "deadlines",
+        "special exam", "special exams", "enrollment", "registration", "eligibility",
+
+        # Portuguese
+        "regulamento", "regulamentos", "norma", "normas", "regra", "regras",
+        "procedimento", "procedimentos", "prazo", "prazos",
+        "época especial", "epoca especial", "exame", "exames",
+        "inscrever", "inscrição", "inscricao", "acesso", "elegível", "elegivel",
+        "quem se pode", "quem pode", "estatuto especial", "serviços académicos", "servicos academicos"
     ])
     
-def is_priority_source(src: str) -> bool:
+def is_eligibility_question(q: str) -> bool:
+    return bool(ELIGIBILITY_QUESTION_RE.search(q or ""))
+    
+def is_priority_source(src: str, priority_sources: list[str] | None = None) -> bool:
     if not src:
         return False
-    return any(src.strip().lower() == p.lower() for p in PRIORITY_SOURCES)
+    priority_sources = priority_sources or PRIORITY_SOURCES
+    return any(src.strip().lower() == p.lower() for p in priority_sources)
+
+def is_regulatory_source(src: str) -> bool:
+    s = (src or "").lower()
+    return any(k in s for k in [
+        "regulamento", "regulation", "despacho", "norma", "statute", "estatuto"
+    ])
+
+
+def is_fee_table_source(src: str) -> bool:
+    s = (src or "").lower()
+    return any(k in s for k in [
+        "tabela de emolumentos", "emolumentos", "fees", "tuition", "costs"
+    ])
+
+
+def is_form_source(src: str) -> bool:
+    s = (src or "").lower()
+    return any(k in s for k in [
+        "inscricao", "inscrição", "form", "formulario", "formulário", "requerimento"
+    ])
 
 def safe_int(v):
     try:
@@ -629,6 +742,54 @@ def contact_chunk_quality(doc: str, meta: dict) -> float:
 
     if TEACHING_EXAMPLE_RE.search(doc):
         score -= 0.60
+
+    return score
+
+def policy_chunk_quality(doc: str, meta: dict, query_text: str, is_global_scope: bool = False) -> float:
+    doc = doc or ""
+    meta = meta or {}
+    q = (query_text or "").lower()
+    src = (meta.get("source") or "")
+    chunk_type = (meta.get("chunk_type") or "").lower()
+
+    score = 0.0
+
+    # Prefer normative sources in global/policy mode
+    if is_regulatory_source(src):
+        score += 0.40
+    if is_fee_table_source(src):
+        score -= 0.40
+    if is_form_source(src):
+        score -= 0.50
+
+    ask_special = bool(SPECIAL_EXAM_RE.search(q))
+    ask_eligibility = is_eligibility_question(q)
+
+    # Explicit access / entitlement / eligibility cues
+    if ACCESS_CUE_RE.search(doc):
+        score += 0.45
+
+    # Query-aware special exam handling
+    if ask_special:
+        if SPECIAL_EXAM_RE.search(doc):
+            score += 0.60
+        if RESIT_EXAM_RE.search(doc) and not SPECIAL_EXAM_RE.search(doc):
+            score -= 0.60
+
+    # Penalize purely procedural chunks for eligibility questions
+    if ask_eligibility:
+        if chunk_type == "page" and PROCEDURAL_POLICY_RE.search(doc) and not ACCESS_CUE_RE.search(doc):
+            score -= 0.40
+
+        if chunk_type == "block" and ACCESS_CUE_RE.search(doc):
+            score += 0.20
+            
+    if PERIOD_SCOPE_RE.search(doc) and not ACCESS_CUE_RE.search(doc):
+        score -= 0.15
+
+    # Slight boost for formal rule-style chunks
+    if "artigo" in doc.lower():
+        score += 0.10
 
     return score
 
@@ -773,6 +934,50 @@ def source_map_has_new_contact_payload(source_map: list[dict], known_names: set,
             return True
     return False
 
+def expand_adjacent_regulation_pages(collection, ranked_items, max_extra=4):
+    expanded = list(ranked_items)
+    seen = {doc_key(d, m) for d, m, _, _ in ranked_items}
+
+    for doc, meta, dist, score in ranked_items:
+        src = (meta or {}).get("source")
+        page = safe_int((meta or {}).get("page"))
+
+        if not src or page is None:
+            continue
+
+        if not is_regulatory_source(src):
+            continue
+
+        target_pages = {page - 1, page + 1}
+
+        try:
+            siblings = collection.get(
+                where={"source": src},
+                include=["documents", "metadatas"]
+            )
+        except Exception:
+            continue
+
+        docs = siblings.get("documents") or []
+        metas = siblings.get("metadatas") or []
+
+        for d, m in zip(docs, metas):
+            mp = safe_int((m or {}).get("page"))
+            if mp not in target_pages:
+                continue
+
+            k = doc_key(d, m)
+            if k in seen:
+                continue
+
+            expanded.append((d, m, dist, score - 0.03))
+            seen.add(k)
+
+            if len(expanded) >= len(ranked_items) + max_extra:
+                return expanded
+
+    return expanded
+
 # -----------------------------
 # ROUTES
 # -----------------------------
@@ -785,6 +990,8 @@ def ask(data: Query):
     q_for_retrieval = build_retrieval_query(q, data.history)
 
     is_global_scope = (data.courseid == 0)
+    
+    effective_priority_sources = [] if is_global_scope else PRIORITY_SOURCES
 
     try:
         source_courseid = resolve_global_source_course_id() if is_global_scope else int(data.courseid)
@@ -815,9 +1022,9 @@ def ask(data: Query):
     if q_kw and q_kw.lower() != q_for_retrieval.lower():
         queries.append(q_kw)
 
-    q2 = ""
+    q2 = ""  
     if ENABLE_QUERY_REWRITE:
-        q2 = ollama_rewrite_query(q_for_retrieval)
+        q2 = ollama_rewrite_query_global(q_for_retrieval) if is_global_scope else ollama_rewrite_query_course(q_for_retrieval)
         if q2 and q2.lower() not in [x.lower() for x in queries]:
             queries.append(q2)
 
@@ -841,6 +1048,7 @@ def ask(data: Query):
 
     want_contacts = is_contacts_question(q_for_retrieval)
     want_policy = is_policy_question(q_for_retrieval)
+    want_eligibility = is_eligibility_question(q_for_retrieval)
     
     additive_followup = want_contacts and is_additive_followup(q)
     known_names, known_emails = extract_known_contact_entities(data.history) if want_contacts else (set(), set())
@@ -878,21 +1086,25 @@ def ask(data: Query):
             if section_type == "example":
                 score -= 0.10
 
+            # Policy/global-specific scoring
+            if want_policy or is_global_scope:
+                score += policy_chunk_quality(doc, meta, q_for_retrieval, is_global_scope=is_global_scope)
+
             # Contact-specific scoring
             if want_contacts:
                 score += contact_chunk_quality(doc, meta)
 
                 if EMAIL_RE.search(doc) and not TEACHER_LABEL_RE.search(doc):
                     score -= 0.05
-                    
+
                 if additive_followup:
                     score += contact_novelty_bonus(doc, known_names, known_emails)
 
             # Canonical priority-source boosts
-            if want_policy and is_priority_source(src):
+            if want_policy and is_priority_source(src, effective_priority_sources):
                 score += 0.30
 
-            if is_priority_source(src):
+            if is_priority_source(src, effective_priority_sources):
                 score += SOURCE_BONUS * 2
 
             k = doc_key(doc, meta)
@@ -908,6 +1120,30 @@ def ask(data: Query):
                 seen_sources.add(src)
 
     candidates = list(merged.values())
+    
+    if want_policy or is_global_scope:
+        regulatory_candidates = [
+            c for c in candidates
+            if is_regulatory_source((c[1] or {}).get("source", ""))
+        ]
+        if regulatory_candidates:
+            candidates = regulatory_candidates
+            
+    if want_policy or is_global_scope:
+        policy_candidates = [
+            c for c in candidates
+            if policy_chunk_quality(c[0], c[1], q_for_retrieval, is_global_scope=is_global_scope) > 0
+        ]
+        if policy_candidates:
+            candidates = policy_candidates
+            
+    if want_eligibility:
+        eligibility_candidates = [
+            c for c in candidates
+            if ACCESS_CUE_RE.search(c[0] or "")
+        ]
+        if eligibility_candidates:
+            candidates = eligibility_candidates
 
     if want_contacts:
         filtered_candidates = [
@@ -960,7 +1196,7 @@ def ask(data: Query):
     # 1) Priority source selection
     priority_candidates = [
         c for c in candidates
-        if is_priority_source((c[1] or {}).get("source", ""))
+        if is_priority_source((c[1] or {}).get("source", ""), effective_priority_sources)
         and (
             not want_contacts
             or contact_chunk_quality(c[0], c[1]) > 0.10
@@ -1050,6 +1286,10 @@ def ask(data: Query):
             
     if want_contacts:
         top = expand_same_page_siblings(collection, top, max_extra=6)
+        
+    if want_policy or want_eligibility or is_global_scope:
+        top = expand_adjacent_regulation_pages(collection, top, max_extra=4)
+        top.sort(key=lambda x: (-x[3], x[2]))
 
     context, used_sources = pack_context(
         top,
@@ -1147,8 +1387,41 @@ ANSWER:
         return {"answer": "Error: empty response from model."}
 
     used_source_ids, clean_answer = extract_used_source_ids(answer, used_sources)
+    used_sources_from_model = bool(used_source_ids)
 
-    final_sources = build_sources_from_ids(used_source_ids, used_sources)
+    if used_source_ids:
+        selected_items = [item for item in used_sources if item["id"] in used_source_ids]
+
+        # In global/policy mode, prefer regulatory sources even when model returned IDs.
+        if want_policy or is_global_scope:
+            regulatory_selected = [
+                item for item in selected_items
+                if is_regulatory_source(item.get("source", ""))
+            ]
+            if regulatory_selected:
+                selected_items = regulatory_selected
+
+        final_sources = format_sources(selected_items)
+
+    else:
+        if clean_answer.strip() != no_info_text(is_global_scope):
+            fallback_scored = simple_source_ranking(clean_answer, q, used_sources)
+            fallback_items = [item for item, _score in fallback_scored]
+
+            # In policy/global mode, keep only normative chunks that match policy semantics
+            if want_policy or is_global_scope:
+                filtered_items = [
+                    item for item in fallback_items
+                    if policy_chunk_quality(item.get("content", ""), item, q_for_retrieval, is_global_scope=is_global_scope) > 0
+                ]
+                if filtered_items:
+                    fallback_items = filtered_items
+
+            fallback_items = fallback_items[:3]
+            final_sources = format_sources(fallback_items)
+            used_source_ids = [item["id"] for item in fallback_items]
+        else:
+            final_sources = []
 
     resp = {
         "answer": clean_answer,
@@ -1161,11 +1434,16 @@ ANSWER:
             "source_courseid": source_courseid,
             "collection_name": collection_name,
             "queries": queries,
+            "q_for_retrieval": q_for_retrieval,
+            "want_policy": want_policy,
+            "want_contacts": want_contacts,
+            "want_eligibility": want_eligibility,
             "best_dist": best_dist,
-            "priority_sources": PRIORITY_SOURCES,
+            "effective_priority_sources": effective_priority_sources,
             "top_sources": used_sources,
             "used_source_ids": used_source_ids,
             "final_sources": final_sources,
+            "source_resolution_mode": "model_used_sources" if used_sources_from_model else "fallback_overlap",
             "context_preview": context[:800]
         }
     return resp
