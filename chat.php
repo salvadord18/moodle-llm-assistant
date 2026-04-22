@@ -146,9 +146,26 @@ echo $OUTPUT->header();
 
         const chips = document.createElement("div");
         formatted.forEach(function(t) {
-          const chip = document.createElement("span");
-          chip.className = "llm-chip";
+          const chip = document.createElement("a");
+          chip.className = "llm-chip llm-chip--link";
           chip.textContent = t;
+          chip.target = "_blank";
+          chip.rel = "noopener noreferrer";
+
+          const m = t.match(/^(.*?)(?:\s+\(p\.\s*([0-9]+)(?:-[0-9]+)?(?:,\s*.*)?\))?$/i);
+          const filename = m ? m[1].trim() : t.trim();
+          const page = (m && m[2]) ? parseInt(m[2], 10) : null;
+
+          let href = M.cfg.wwwroot + "/blocks/llmassistant/source_file.php/"
+            + encodeURIComponent(filename)
+            + "?courseid=" + encodeURIComponent(courseId)
+            + "&source=" + encodeURIComponent(filename);
+
+          if (page) {
+            href += "#page=" + page;
+          }
+
+          chip.href = href;
           chips.appendChild(chip);
         });
 

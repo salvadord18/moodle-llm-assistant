@@ -184,6 +184,15 @@
   animation: llmspin 0.8s linear infinite;
 }
 
+.llm-chip--link {
+  text-decoration: none;
+  cursor: pointer;
+}
+
+.llm-chip--link:hover {
+  text-decoration: underline;
+}
+
 @keyframes llmspin {
   to { transform: rotate(360deg); }
 }
