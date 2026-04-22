@@ -22,7 +22,7 @@ What this version improves:
 
 import os
 import re
-from typing import Dict, Iterable, List, Tuple
+from typing import Dict, List, Tuple
 
 import fitz
 import psycopg2
@@ -56,7 +56,7 @@ MIN_TEXT_CHARS = int(os.getenv("RAG_MIN_TEXT_CHARS", "30"))
 # REGEX / LABELS
 # -----------------------------
 CONTACT_RE = re.compile(
-    r"\b(lecturer|instructor|professor|teacher|faculty|contact|email|office hours?|labs?|practical)\b",
+    r"\b(lecturer|instructor|professor|teacher|faculty|contact|contacto|contactos|email|office hours?|labs?|practical|docente|docentes|regente)\b",
     re.I
 )
 ASSESSMENT_RE = re.compile(r"\b(assessment|exam|grade|grading|evaluation|criteria|policy|deadline|submission|deliverable)\b", re.I)
@@ -242,7 +242,7 @@ def get_collection_for_course(chroma_client: PersistentClient, courseid: int):
     collection = chroma_client.get_or_create_collection(
         name=name,
         embedding_function=DefaultEmbeddingFunction(),
-        metadata={"courseid": courseid, "kind": "moodle_course_docs", "chunk_type": "block"},
+        metadata={"courseid": courseid, "kind": "moodle_course_docs"},
     )
     return name, collection
 
@@ -315,6 +315,7 @@ def build_records_for_pdf(courseid: int, contenthash: str, filename: str, contex
                 "section_type": infer_section_type(block),
                 "title_hint": title_hint,
                 "contenthash": contenthash,
+                "chunk_type": "block",
             })
     return ids, docs, metas
 
