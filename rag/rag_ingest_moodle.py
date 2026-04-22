@@ -55,7 +55,10 @@ MIN_TEXT_CHARS = int(os.getenv("RAG_MIN_TEXT_CHARS", "30"))
 # -----------------------------
 # REGEX / LABELS
 # -----------------------------
-CONTACT_RE = re.compile(r"\b(lecturer|instructor|professor|teacher|faculty|contact|email|office hours?)\b", re.I)
+CONTACT_RE = re.compile(
+    r"\b(lecturer|instructor|professor|teacher|faculty|contact|email|office hours?|labs?|practical)\b",
+    re.I
+)
 ASSESSMENT_RE = re.compile(r"\b(assessment|exam|grade|grading|evaluation|criteria|policy|deadline|submission|deliverable)\b", re.I)
 SCHEDULE_RE = re.compile(r"\b(schedule|calendar|week\s*\d+|session|timeline|plan|agenda|date)\b", re.I)
 EXAMPLE_RE = re.compile(r"\b(example|exercise|case study|dataset|sample|patients?|orders?|appointments?|payment)\b", re.I)
@@ -128,7 +131,7 @@ def split_into_structured_blocks(page_text: str, max_chars: int = MAX_BLOCK_CHAR
     final_blocks: List[str] = []
     for block in blocks:
         if len(block) <= max_chars:
-            if len(block) >= MIN_TEXT_CHARS:
+            if len(block) >= MIN_TEXT_CHARS or infer_section_type(block) == "contact":
                 final_blocks.append(block)
             continue
 
@@ -239,7 +242,7 @@ def get_collection_for_course(chroma_client: PersistentClient, courseid: int):
     collection = chroma_client.get_or_create_collection(
         name=name,
         embedding_function=DefaultEmbeddingFunction(),
-        metadata={"courseid": courseid, "kind": "moodle_course_docs"},
+        metadata={"courseid": courseid, "kind": "moodle_course_docs", "chunk_type": "block"},
     )
     return name, collection
 
@@ -249,10 +252,17 @@ def pdf_path_from_hash(contenthash: str) -> str:
 
 
 def extract_page_texts(pdf_path: str) -> List[Tuple[int, str]]:
-    page_texts: List[Tuple[int, str]] = []
+    page_texts = []
     with fitz.open(pdf_path) as doc:
         for idx, page in enumerate(doc, start=1):
-            text = normalize(page.get_text("text") or "")
+            blocks = page.get_text("blocks") or []
+            lines = []
+            for b in blocks:
+                if len(b) >= 5:
+                    text = b[4]
+                    if text and text.strip():
+                        lines.append(text.strip())
+            text = normalize("\n".join(lines))
             if text:
                 page_texts.append((idx, text))
     return page_texts
@@ -276,6 +286,21 @@ def build_records_for_pdf(courseid: int, contenthash: str, filename: str, contex
 
     for page_num, page_text in page_texts:
         title_hint = page_title_hint(page_text)
+        # PAGE-LEVEL FALLBACK CHUNK
+        page_rec_id = f"{contenthash}:p{page_num}:page"
+        ids.append(page_rec_id)
+        docs.append(page_text)
+        metas.append({
+            "courseid": int(courseid),
+            "source": filename,
+            "page": int(page_num),
+            "chunk_index": -1,
+            "contextlevel": int(contextlevel),
+            "section_type": infer_section_type(page_text),
+            "title_hint": title_hint,
+            "contenthash": contenthash,
+            "chunk_type": "page",
+        })
         blocks = split_into_structured_blocks(page_text)
         for chunk_index, block in enumerate(blocks):
             rec_id = f"{contenthash}:p{page_num}:c{chunk_index}"
