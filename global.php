@@ -202,10 +202,7 @@ echo $OUTPUT->header();
       const messages = data.messages || [];
 
       chatWindow.innerHTML = "";
-      if (!messages.length) {
-        addMessage("Hi! Ask me about faculty rules and general information.", "bot");
-        return;
-      }
+      addMessage("Hi! Ask me about faculty rules and general information.", "bot");
 
       for (const m of messages) {
         if (m.role === "assistant") {
