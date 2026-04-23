@@ -983,6 +983,8 @@ def expand_adjacent_regulation_pages(collection, ranked_items, max_extra=4):
 # -----------------------------
 @app.post("/ask")
 def ask(data: Query):
+    t0_total = time.perf_counter()
+    
     q = (data.question or "").strip()
     if not q:
         return {"answer": "Please enter a question.", "sources": []}
@@ -1030,6 +1032,7 @@ def ask(data: Query):
 
     q_mix = " ".join([x for x in [q_for_retrieval, q_kw, q2] if x]).strip()
 
+    t0_retrieval = time.perf_counter()
     try:
         results = collection.query(
             query_texts=queries,
@@ -1045,6 +1048,8 @@ def ask(data: Query):
     all_docs = results.get("documents") or []
     all_metas = results.get("metadatas") or []
     all_dists = results.get("distances") or []
+    
+    retrieval_ms = round((time.perf_counter() - t0_retrieval) * 1000, 1)
 
     want_contacts = is_contacts_question(q_for_retrieval)
     want_policy = is_policy_question(q_for_retrieval)
@@ -1060,8 +1065,10 @@ def ask(data: Query):
 
     merged = {}
     seen_sources = set()
+    
+    t0_rerank = time.perf_counter()
 
-    for qi in range(len(queries)):
+    for qi in range(len(queries)):        
         docs_i = all_docs[qi] if qi < len(all_docs) else []
         metas_i = all_metas[qi] if qi < len(all_metas) else []
         dists_i = all_dists[qi] if qi < len(all_dists) else []
@@ -1296,6 +1303,8 @@ def ask(data: Query):
         q_mix,
         mode="contacts" if want_contacts else "generic"
     )
+    
+    rerank_context_ms = round((time.perf_counter() - t0_rerank) * 1000, 1)
 
     if want_contacts and additive_followup and not source_map_has_new_contact_payload(used_sources, known_names, known_emails):
         fallback_top = [
@@ -1374,9 +1383,11 @@ Fallback:
 
 ANSWER:
 """
-
+    t0_generation = time.perf_counter()
+    
     try:
         answer = ollama_generate(prompt).strip()
+        generation_ms = round((time.perf_counter() - t0_generation) * 1000, 1)
     except Exception as e:
         resp = {"answer": "Error: LLM generation failed."}
         if DEBUG:
@@ -1422,6 +1433,8 @@ ANSWER:
             used_source_ids = [item["id"] for item in fallback_items]
         else:
             final_sources = []
+            
+    total_ms = round((time.perf_counter() - t0_total) * 1000, 1)
 
     resp = {
         "answer": clean_answer,
@@ -1444,6 +1457,12 @@ ANSWER:
             "used_source_ids": used_source_ids,
             "final_sources": final_sources,
             "source_resolution_mode": "model_used_sources" if used_sources_from_model else "fallback_overlap",
+            "timing_ms": {
+                "retrieval": retrieval_ms,
+                "rerank_and_context": rerank_context_ms,
+                "generation": generation_ms,
+                "total": total_ms
+            },
             "context_preview": context[:800]
         }
     return resp

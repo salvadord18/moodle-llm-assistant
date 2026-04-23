@@ -15,6 +15,8 @@ require_once($CFG->dirroot . '/blocks/llmassistant/classes/local/history_manager
 header('Content-Type: application/json; charset=utf-8');
 
 try {
+    $t0total = microtime(true);
+
     require_login();
     require_sesskey();
 
@@ -51,6 +53,8 @@ try {
         'history'  => $history,
     ], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
 
+    $t0api = microtime(true);
+
     $ch = curl_init($apiurl);
     curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
     curl_setopt($ch, CURLOPT_HTTPHEADER, ['Content-Type: application/json']);
@@ -60,6 +64,8 @@ try {
     curl_setopt($ch, CURLOPT_TIMEOUT, 60);
 
     $response = curl_exec($ch);
+
+    $apims = round((microtime(true) - $t0api) * 1000, 1);
 
     if ($response === false) {
         $err = curl_error($ch);
@@ -131,6 +137,8 @@ try {
         ob_clean();
     }
 
+    $totalms = round((microtime(true) - $t0total) * 1000, 1);
+
     $out = [
         'answer'  => $answer,
         'sources' => $sources,
@@ -140,6 +148,15 @@ try {
     if (!empty($data['debug'])) {
         $out['debug'] = $data['debug'];
     }
+
+    if (!isset($out['debug']) || !is_array($out['debug'])) {
+        $out['debug'] = [];
+    }
+
+    $out['debug']['timing_php_ms'] = [
+        'api_call' => $apims,
+        'total' => $totalms,
+    ];
 
     echo json_encode($out, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
     exit;
