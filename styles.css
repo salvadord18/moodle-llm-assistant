@@ -83,24 +83,7 @@
   background: rgba(255,255,255,0.28);
 }
 
-.llm-chat-window {
-  flex: 1;
-  min-height: 0;
-  overflow-y: auto;
-  padding: 12px;
-  background: #fff;
-}
-
-.llm-msg-user {
-  background: #d4edda;
-  padding: 10px;
-  margin-bottom: 8px;
-  border-radius: 12px;
-  max-width: 85%;
-  margin-left: auto;
-  white-space: pre-wrap;
-}
-
+.llm-msg-user,
 .llm-msg-bot {
   background: #e9ecef;
   padding: 10px;
@@ -108,21 +91,81 @@
   border-radius: 12px;
   max-width: 85%;
   white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+  box-sizing: border-box;
+}
+
+.llm-msg-user {
+  background: #d4edda;
+  margin-left: auto;
 }
 
 .llm-sources {
   margin-top: 8px;
   font-size: 12px;
   opacity: 0.95;
+  width: 100%;
+  min-width: 0;
+}
+
+.llm-sources > div:last-child {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  min-width: 0;
 }
 
 .llm-chip {
   display: inline-block;
-  padding: 2px 8px;
-  margin: 4px 6px 0 0;
+  max-width: 100%;
+  padding: 4px 8px;
+  margin: 0;
   border-radius: 999px;
   background: #fff;
   border: 1px solid #d0d7de;
+  white-space: normal;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+  box-sizing: border-box;
+}
+
+/* ---------------------------------------------------------
+   Sidebar block: stack source links vertically
+   --------------------------------------------------------- */
+.llm-chat-container .llm-sources > div:last-child {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 6px;
+}
+
+.llm-chat-container .llm-chip,
+.llm-chat-container .llm-chip--link {
+  display: block;
+  width: 100%;
+  max-width: 100%;
+  padding: 6px 10px;
+  margin: 0;
+  border-radius: 12px;
+  line-height: 1.35;
+  white-space: normal;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+  box-sizing: border-box;
+}
+
+.llm-chat-container .llm-sources {
+  overflow: hidden;
+}
+
+.llm-chat-window {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
+  padding: 12px;
+  background: #fff;
 }
 
 .llm-chat-inputwrap,
