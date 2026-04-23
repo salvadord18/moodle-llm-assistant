@@ -1,19 +1,31 @@
 <?php
 require_once(__DIR__ . '/../../config.php');
 
+/**
+ * Start buffering early so that any accidental output
+ * does not break send_stored_file() headers.
+ */
+ob_start();
+
 $courseid = required_param('courseid', PARAM_INT);
-$source = required_param('source', PARAM_FILE);
+$source = optional_param('source', '', PARAM_RAW_TRIMMED);
+
+if ($source === '' && !empty($_SERVER['PATH_INFO'])) {
+    $source = trim((string)$_SERVER['PATH_INFO'], '/');
+}
+
+$source = trim($source);
+if ($source === '') {
+    throw new moodle_exception('missingparam', 'error', '', 'source');
+}
 
 require_login();
 
-$dbprefix = $CFG->prefix;
-
 function llmassistant_normalize_compare(string $text): string {
     $text = core_text::strtolower(trim($text));
-    $text = \core_text::substr($text, 0); // ensure utf8-safe
     $text = iconv('UTF-8', 'ASCII//TRANSLIT//IGNORE', $text);
     $text = preg_replace('/\s+/', ' ', $text);
-    return trim($text ?? '');
+    return trim((string)$text);
 }
 
 function llmassistant_resolve_global_source_course_id(): int {
@@ -51,40 +63,65 @@ if ($sourcecourseid > 0 && $courseid !== 0) {
 }
 
 $sql = "
-    SELECT f.id
-      FROM {files} f
-      JOIN {context} c
-        ON f.contextid = c.id
- LEFT JOIN {course_modules} cm
-        ON c.contextlevel = 70
-       AND c.instanceid = cm.id
-     WHERE f.filename = :filename
-       AND f.filesize > 0
-       AND (
+    SELECT
+        f.id,
+        f.filename,
+        f.component,
+        f.filearea,
+        f.timemodified
+    FROM {files} f
+    JOIN {context} c
+      ON f.contextid = c.id
+    LEFT JOIN {course_modules} cm
+      ON c.contextlevel = 70
+     AND c.instanceid = cm.id
+    WHERE f.filename = :filename
+      AND f.filesize > 0
+      AND f.filename <> '.'
+      AND f.mimetype = 'application/pdf'
+      AND f.component = 'mod_resource'
+      AND f.filearea = 'content'
+      AND (
             (c.contextlevel = 50 AND c.instanceid = :courseid1)
             OR
             (c.contextlevel = 70 AND cm.course = :courseid2)
-       )
-  ORDER BY f.timemodified DESC, f.id DESC
+      )
+    ORDER BY f.timemodified DESC, f.id DESC
 ";
 
 $params = [
-    'filename' => $source,
+    'filename'  => $source,
     'courseid1' => $sourcecourseid,
     'courseid2' => $sourcecourseid,
 ];
 
-$fileid = $DB->get_field_sql($sql, $params);
+$records = $DB->get_records_sql($sql, $params, 0, 50);
 
-if (!$fileid) {
+if (!$records) {
     throw new moodle_exception('filenotfound', 'error');
 }
 
 $fs = get_file_storage();
-$file = $fs->get_file_by_id($fileid);
+$file = null;
 
-if (!$file || $file->is_directory()) {
+foreach ($records as $rec) {
+    $candidate = $fs->get_file_by_id((int)$rec->id);
+    if ($candidate && !$candidate->is_directory()) {
+        $file = $candidate;
+        break;
+    }
+}
+
+if (!$file) {
     throw new moodle_exception('filenotfound', 'error');
+}
+
+/**
+ * Clear any accidental output before sending the file,
+ * otherwise Moodle/PHP may complain about headers already sent.
+ */
+while (ob_get_level()) {
+    ob_end_clean();
 }
 
 // Serve inline so the browser PDF viewer can use #page=N.
