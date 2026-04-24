@@ -10,11 +10,19 @@ ob_start();
 $courseid = required_param('courseid', PARAM_INT);
 $source = optional_param('source', '', PARAM_RAW_TRIMMED);
 
+/**
+ * Fallback: if source was not passed correctly as query param,
+ * try PATH_INFO and decode it.
+ */
 if ($source === '' && !empty($_SERVER['PATH_INFO'])) {
-    $source = trim((string)$_SERVER['PATH_INFO'], '/');
+    $source = rawurldecode(trim((string)$_SERVER['PATH_INFO'], '/'));
 }
 
-$source = trim($source);
+/**
+ * Decode defensively in case source arrives URL-encoded.
+ */
+$source = rawurldecode(trim($source));
+
 if ($source === '') {
     throw new moodle_exception('missingparam', 'error', '', 'source');
 }
@@ -62,7 +70,10 @@ if ($sourcecourseid > 0 && $courseid !== 0) {
     require_login($course);
 }
 
-$sql = "
+/**
+ * First try: strict lookup for normal Moodle resource PDFs.
+ */
+$sqlstrict = "
     SELECT
         f.id,
         f.filename,
@@ -89,13 +100,51 @@ $sql = "
     ORDER BY f.timemodified DESC, f.id DESC
 ";
 
+/**
+ * Fallback: broader lookup if the strict query finds nothing.
+ */
+$sqlfallback = "
+    SELECT
+        f.id,
+        f.filename,
+        f.component,
+        f.filearea,
+        f.timemodified
+    FROM {files} f
+    JOIN {context} c
+      ON f.contextid = c.id
+    LEFT JOIN {course_modules} cm
+      ON c.contextlevel = 70
+     AND c.instanceid = cm.id
+    WHERE f.filename = :filename
+      AND f.filesize > 0
+      AND f.filename <> '.'
+      AND f.mimetype = 'application/pdf'
+      AND (
+            (c.contextlevel = 50 AND c.instanceid = :courseid1)
+            OR
+            (c.contextlevel = 70 AND cm.course = :courseid2)
+      )
+    ORDER BY
+      CASE
+        WHEN f.component = 'mod_resource' AND f.filearea = 'content' THEN 0
+        ELSE 1
+      END,
+      f.timemodified DESC,
+      f.id DESC
+";
+
 $params = [
     'filename'  => $source,
     'courseid1' => $sourcecourseid,
     'courseid2' => $sourcecourseid,
 ];
 
-$records = $DB->get_records_sql($sql, $params, 0, 50);
+$records = $DB->get_records_sql($sqlstrict, $params, 0, 50);
+
+if (!$records) {
+    $records = $DB->get_records_sql($sqlfallback, $params, 0, 50);
+}
 
 if (!$records) {
     throw new moodle_exception('filenotfound', 'error');
