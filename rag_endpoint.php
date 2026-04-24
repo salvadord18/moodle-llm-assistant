@@ -11,6 +11,70 @@ require_once(__DIR__ . '/../../config.php');
 require_once($CFG->dirroot . '/blocks/llmassistant/classes/local/history_manager.php');
 
 /**
+ * Lightweight language detection from the user question.
+ * Returns 'pt' or 'en'.
+ */
+function llmassistant_detect_language(string $text): string {
+    $text = core_text::strtolower(trim($text));
+
+    if ($text === '') {
+        return 'en';
+    }
+
+    // Strong Portuguese diacritic cues.
+    if (preg_match('/[áàâãéêíóôõúç]/u', $text)) {
+        return 'pt';
+    }
+
+    // Strong Portuguese lexical cues.
+    if (preg_match('/\b(quem|quais?|qual|como|quando|onde|porque|porquê|prazo|prazos|inscri[cç][aã]o|inscrever|exame|exames|época|epoca|recurso|melhoria|avalia[cç][aã]o|regulamento|regulamentos|docente|docentes|professor|professores|contacto|contactos|correio|estatuto|servi[cç]os acad[eé]micos)\b/u', $text)) {
+        return 'pt';
+    }
+
+    return 'en';
+}
+
+/**
+ * Localized user-facing messages for rag_endpoint.php.
+ */
+function llmassistant_localized_text(string $key, string $lang, array $vars = []): string {
+    $messages = [
+        'timeout' => [
+            'pt' => 'O pedido ao assistente demorou demasiado tempo. Tente novamente dentro de instantes.',
+            'en' => 'The request to the assistant took too long. Please try again in a moment.',
+        ],
+        'unreachable' => [
+            'pt' => 'Não foi possível contactar o serviço do assistente neste momento.',
+            'en' => 'The assistant service could not be reached at the moment.',
+        ],
+        'http_error' => [
+            'pt' => 'O serviço do assistente devolveu um erro interno (HTTP {{code}}).',
+            'en' => 'The assistant service returned an internal error (HTTP {{code}}).',
+        ],
+        'invalid_json' => [
+            'pt' => 'O serviço do assistente devolveu uma resposta inválida.',
+            'en' => 'The assistant service returned an invalid response.',
+        ],
+        'empty_answer' => [
+            'pt' => 'O assistente devolveu uma resposta vazia.',
+            'en' => 'The assistant returned an empty response.',
+        ],
+        'server_failed' => [
+            'pt' => 'O pedido falhou no servidor.',
+            'en' => 'The request failed on the server.',
+        ],
+    ];
+
+    $text = $messages[$key][$lang] ?? $messages[$key]['en'] ?? 'Error.';
+
+    foreach ($vars as $k => $v) {
+        $text = str_replace('{{' . $k . '}}', (string)$v, $text);
+    }
+
+    return $text;
+}
+
+/**
  * Normalizes text to use in the files/folders names.
  */
 function llmassistant_slugify(string $text, int $maxlen = 40): string {
@@ -153,6 +217,7 @@ try {
     $question = required_param('question', PARAM_TEXT);
     $courseid = required_param('courseid', PARAM_INT);
     $userid = $USER->id;
+    $userlang = llmassistant_detect_language($question);
 
     $apiurl = 'http://127.0.0.1:8001/ask';
 
@@ -192,8 +257,8 @@ try {
     curl_setopt($ch, CURLOPT_HTTPHEADER, ['Content-Type: application/json']);
     curl_setopt($ch, CURLOPT_POST, true);
     curl_setopt($ch, CURLOPT_POSTFIELDS, $payload);
-    curl_setopt($ch, CURLOPT_CONNECTTIMEOUT, 5);
-    curl_setopt($ch, CURLOPT_TIMEOUT, 60);
+    curl_setopt($ch, CURLOPT_CONNECTTIMEOUT, 10);
+    curl_setopt($ch, CURLOPT_TIMEOUT, 180);
 
     $response = curl_exec($ch);
 
@@ -201,16 +266,28 @@ try {
 
     if ($response === false) {
         $err = curl_error($ch);
+        $errno = curl_errno($ch);
         curl_close($ch);
 
         if (ob_get_length()) {
             ob_clean();
         }
 
+        $isTimeout = in_array($errno, [CURLE_OPERATION_TIMEDOUT], true);
+
+        $answer = $isTimeout
+            ? llmassistant_localized_text('timeout', $userlang)
+            : llmassistant_localized_text('unreachable', $userlang);
+
         echo json_encode([
-            'answer'  => 'Error: cannot reach the RAG API. Make sure uvicorn is running on 127.0.0.1:8001.',
+            'answer'  => $answer,
             'sources' => [],
-            'debug'   => $err,
+            'debug'   => [
+                'curl_errno' => $errno,
+                'curl_error' => $err,
+                'transport_error_kind' => $isTimeout ? 'timeout' : 'unreachable',
+                'rag_api_url' => $apiurl,
+            ],
         ], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
         exit;
     }
@@ -224,9 +301,12 @@ try {
         }
 
         echo json_encode([
-            'answer'  => 'Error: the RAG API returned HTTP ' . $httpcode . '. Check /tmp/rag_api.log.',
+            'answer'  => llmassistant_localized_text('http_error', $userlang, ['code' => $httpcode]),
             'sources' => [],
-            'debug'   => $response,
+            'debug'   => [
+                'http_code' => $httpcode,
+                'rag_response' => $response,
+            ],
         ], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
         exit;
     }
@@ -239,9 +319,11 @@ try {
         }
 
         echo json_encode([
-            'answer'  => 'Error: invalid JSON from the RAG API.',
+            'answer'  => llmassistant_localized_text('invalid_json', $userlang),
             'sources' => [],
-            'debug'   => $response,
+            'debug'   => [
+                'rag_response' => $response,
+            ],
         ], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
         exit;
     }
@@ -251,7 +333,7 @@ try {
 
     $answer = trim((string)($data['answer'] ?? ''));
     if ($answer === '') {
-        $answer = 'Error: empty answer returned by RAG backend.';
+        $answer = llmassistant_localized_text('empty_answer', $userlang);
     }
 
     $sources = $data['sources'] ?? [];
@@ -329,7 +411,7 @@ try {
     }
 
     echo json_encode([
-        'answer'  => 'Error: request failed (server-side).',
+        'answer'  => llmassistant_localized_text('server_failed', isset($userlang) ? $userlang : 'en'),
         'sources' => [],
         'debug'   => get_class($e) . ': ' . $e->getMessage(),
     ], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);

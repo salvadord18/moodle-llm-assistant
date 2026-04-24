@@ -590,13 +590,68 @@ def build_sources_from_ids(source_ids: list[str], source_map: list[dict]):
     selected = [by_id[sid] for sid in source_ids if sid in by_id]
     return format_sources(selected)
 
-def no_info_text(is_global_scope: bool) -> str:
-    return (
-        "The provided global documents do not contain this information."
-        if is_global_scope
-        else "The provided PDFs do not contain this information."
-    )
+PORTUGUESE_HINT_RE = re.compile(
+    r"\b(quem|quais?|qual|como|quando|onde|porque|porquê|prazo|prazos|"
+    r"inscri[cç][aã]o|inscrever|exame|exames|época|epoca|recurso|melhoria|"
+    r"avalia[cç][aã]o|regulamento|regulamentos|docente|docentes|professor|professores|"
+    r"contacto|contactos|correio|estatuto|servi[cç]os acad[eé]micos)\b",
+    re.IGNORECASE
+)
 
+def detect_question_language(text: str) -> str:
+    """
+    Very lightweight language guess:
+    - Portuguese if it contains PT-specific accented chars or strong PT cues
+    - English otherwise
+    """
+    t = (text or "").strip().lower()
+    if not t:
+        return "en"
+
+    # Strong Portuguese diacritic cues
+    if re.search(r"[áàâãéêíóôõúç]", t):
+        return "pt"
+
+    # Strong Portuguese lexical cues
+    if PORTUGUESE_HINT_RE.search(t):
+        return "pt"
+
+    return "en"
+
+
+def no_info_text(lang: str, is_global_scope: bool) -> str:
+    if lang == "pt":
+        return (
+            "Não encontrei essa informação nos documentos globais disponibilizados."
+            if is_global_scope
+            else "Não encontrei essa informação nos PDFs disponibilizados para esta unidade curricular."
+        )
+
+    return (
+        "I couldn't find that information in the provided global documents."
+        if is_global_scope
+        else "I couldn't find that information in the provided course PDFs."
+    )
+    
+def localized_error_text(kind: str, lang: str) -> str:
+    messages = {
+        "retrieval_failed": {
+            "pt": "Ocorreu um erro ao procurar informação nos documentos.",
+            "en": "An error occurred while retrieving information from the documents."
+        },
+        "llm_failed": {
+            "pt": "Ocorreu um erro ao gerar a resposta.",
+            "en": "An error occurred while generating the answer."
+        },
+        "empty_response": {
+            "pt": "O modelo devolveu uma resposta vazia.",
+            "en": "The model returned an empty response."
+        },
+    }
+    return messages.get(kind, {}).get(
+        lang,
+        "Ocorreu um erro." if lang == "pt" else "An error occurred."
+    )
 
 def simple_source_ranking(answer: str, query: str, source_map: list[dict]):
     """
@@ -986,19 +1041,25 @@ def ask(data: Query):
     t0_total = time.perf_counter()
     
     q = (data.question or "").strip()
+    user_lang = detect_question_language(q)
+
     if not q:
-        return {"answer": "Please enter a question.", "sources": []}
+        return {
+            "answer": "Por favor, faz uma pergunta." if user_lang == "pt" else "Please ask a question.",
+            "sources": []
+        }
 
     q_for_retrieval = build_retrieval_query(q, data.history)
 
     is_global_scope = (data.courseid == 0)
-    
+    no_info_msg = no_info_text(user_lang, is_global_scope)
+
     effective_priority_sources = [] if is_global_scope else PRIORITY_SOURCES
 
     try:
         source_courseid = resolve_global_source_course_id() if is_global_scope else int(data.courseid)
     except Exception as e:
-        resp = {"answer": "The provided PDFs do not contain this information.", "sources": []}
+        resp = {"answer": no_info_msg, "sources": []}
         if DEBUG:
             resp["debug"] = f"Global source course resolution failed: {e}"
         return resp
@@ -1008,7 +1069,7 @@ def ask(data: Query):
     try:
         collection = client.get_collection(collection_name, embedding_function=embedding_fn)
     except Exception as e:
-        resp = {"answer": "The provided PDFs do not contain this information.", "sources": []}
+        resp = {"answer": no_info_msg, "sources": []}
         if DEBUG:
             resp["debug"] = {
                 "error": f"Collection not found: {collection_name} ({e})",
@@ -1040,7 +1101,7 @@ def ask(data: Query):
             include=["documents", "metadatas", "distances"]
         )
     except Exception as e:
-        resp = {"answer": "Error: retrieval failed.", "sources": []}
+        resp = {"answer": localized_error_text("retrieval_failed", user_lang), "sources": []}
         if DEBUG:
             resp["debug"] = str(e)
         return resp
@@ -1161,7 +1222,7 @@ def ask(data: Query):
             candidates = filtered_candidates
 
     if not candidates:
-        resp = {"answer": "The provided PDFs do not contain this information.", "sources": []}
+        resp = {"answer": no_info_msg, "sources": []}
         if DEBUG:
             resp["debug"] = {
                 "return_stage": "no_candidates",
@@ -1179,7 +1240,7 @@ def ask(data: Query):
 
     if best_dist > threshold:
         candidates = candidates[:10]
-        resp = {"answer": "The provided PDFs do not contain this information.", "sources": []}
+        resp = {"answer": no_info_msg, "sources": []}
         if DEBUG:
             resp["debug"] = {
                 "requested_courseid": data.courseid,
@@ -1367,6 +1428,9 @@ Instructions:
 - If the user is asking for additional or other people/items, do not simply repeat previously mentioned items unless needed for clarity.
 - In that case, look for additional supported items not already mentioned in the chat.
 - If no additional supported items exist in the CONTEXT, say so clearly.
+- Answer in the same language as the user's QUESTION.
+- If the QUESTION is in Portuguese, answer in Portuguese.
+- If the QUESTION is in English, answer in English.
 
 Source handling:
 - Treat each [SOURCE_ID: Sx|...] as a valid evidence unit.
@@ -1379,7 +1443,7 @@ USED_SOURCES: NONE
 
 Fallback:
 - If the answer is not supported by the CONTEXT, reply exactly:
-{ "The provided global documents do not contain this information." if is_global_scope else "The provided PDFs do not contain this information." }
+{no_info_msg}
 
 ANSWER:
 """
@@ -1389,13 +1453,13 @@ ANSWER:
         answer = ollama_generate(prompt).strip()
         generation_ms = round((time.perf_counter() - t0_generation) * 1000, 1)
     except Exception as e:
-        resp = {"answer": "Error: LLM generation failed."}
+        resp = {"answer": localized_error_text("llm_failed", user_lang), "sources": []}
         if DEBUG:
             resp["debug"] = str(e)
         return resp
 
     if not answer:
-        return {"answer": "Error: empty response from model."}
+        return {"answer": localized_error_text("empty_response", user_lang), "sources": []}
 
     used_source_ids, clean_answer = extract_used_source_ids(answer, used_sources)
     used_sources_from_model = bool(used_source_ids)
@@ -1415,7 +1479,7 @@ ANSWER:
         final_sources = format_sources(selected_items)
 
     else:
-        if clean_answer.strip() != no_info_text(is_global_scope):
+        if clean_answer.strip() != no_info_msg:
             fallback_scored = simple_source_ranking(clean_answer, q, used_sources)
             fallback_items = [item for item, _score in fallback_scored]
 
