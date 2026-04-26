@@ -347,3 +347,8 @@ uvicorn rag_api:app --host 0.0.0.0 --port 8001
 pkill -f "uvicorn rag_api:app" || true
 export LLMASSISTANT_DEBUG=1
 uvicorn rag_api:app --host 0.0.0.0 --port 8001
+
+
+# BUILD
+cd ~/dev/moodle-lab/moodle
+npx grunt amd
