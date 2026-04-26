@@ -23,6 +23,11 @@ define(['core/log'], function(Log) {
         const clearBtn = document.getElementById(config.clearButtonId);
         const openBtn = config.openButtonId ? document.getElementById(config.openButtonId) : null;
 
+        let isBusy = false;
+
+        let currentController = null;
+        let currentThinkingEl = null;
+
         if (!chatWindow || !sendBtn || !input || !clearBtn) {
             return;
         }
@@ -212,20 +217,59 @@ define(['core/log'], function(Log) {
         }
 
         /**
-         * Sends a question to the backend.
+         * Updates chat loading status.
+         *
+         * @param {boolean} busy If true, locks input and turns send into stop.
+         */
+        function setBusy(busy) {
+            isBusy = !!busy;
+
+            input.disabled = isBusy;
+
+            // Optional: lock clear/expand while answering.
+            if (clearBtn) {
+                clearBtn.disabled = isBusy;
+            }
+
+            if (openBtn) {
+                openBtn.disabled = isBusy;
+            }
+
+            if (isBusy) {
+                input.setAttribute("aria-disabled", "true");
+            } else {
+                input.removeAttribute("aria-disabled");
+            }
+
+            updateSendButtonState();
+        }
+
+        /**
+         * Sends a question to the backend, or stops the current request if already busy.
          *
          * @returns {Promise<void>}
          */
         async function sendMessage() {
+            // If already generating, clicking the same button stops the request.
+            if (isBusy) {
+                if (currentController) {
+                    currentController.abort();
+                }
+                return;
+            }
+
             const q = (input.value || "").trim();
             if (!q) {
                 return;
             }
 
+            currentController = new AbortController();
+            setBusy(true);
+
             addMessage(q, "user");
             input.value = "";
 
-            const thinkingEl = addThinking();
+            currentThinkingEl = addThinking();
 
             try {
                 const res = await fetch(apiUrl, {
@@ -235,7 +279,8 @@ define(['core/log'], function(Log) {
                         sesskey: M.cfg.sesskey,
                         question: q,
                         courseid: courseId
-                    })
+                    }),
+                    signal: currentController.signal
                 });
 
                 const raw = await res.text();
@@ -259,7 +304,10 @@ define(['core/log'], function(Log) {
                     }
                 }
 
-                thinkingEl.remove();
+                if (currentThinkingEl) {
+                    currentThinkingEl.remove();
+                    currentThinkingEl = null;
+                }
 
                 const answer =
                     (typeof data.answer === "string" && data.answer.trim() !== "")
@@ -268,8 +316,21 @@ define(['core/log'], function(Log) {
 
                 addAssistantMessage(answer, Array.isArray(data.sources) ? data.sources : []);
             } catch (err) {
-                thinkingEl.remove();
-                addMessage("Error contacting the assistant. Please try again.", "bot");
+                if (currentThinkingEl) {
+                    currentThinkingEl.remove();
+                    currentThinkingEl = null;
+                }
+
+                // Abort is intentional stop by user; do not show error bubble.
+                if (err && err.name === "AbortError") {
+                    addMessage("Generation stopped.", "bot");
+                } else {
+                    addMessage("Error contacting the assistant. Please try again.", "bot");
+                }
+            } finally {
+                currentController = null;
+                setBusy(false);
+                input.focus();
             }
         }
 
@@ -302,11 +363,34 @@ define(['core/log'], function(Log) {
         }
 
         input.addEventListener("keydown", function(e) {
+            if (isBusy) {
+                return;
+            }
+
             if (e.key === "Enter" && !e.shiftKey) {
                 e.preventDefault();
                 sendMessage();
             }
         });
+
+        /**
+         * Updates send button appearance/meaning depending on busy state.
+         */
+        function updateSendButtonState() {
+            if (isBusy) {
+                sendBtn.disabled = false; // keep clickable so it can stop
+                sendBtn.setAttribute("aria-label", "Stop generating");
+                sendBtn.setAttribute("title", "Stop generating");
+                sendBtn.classList.add("llm-send-icon--stop");
+            } else {
+                sendBtn.disabled = false;
+                sendBtn.setAttribute("aria-label", "Send message");
+                sendBtn.setAttribute("title", "Send message");
+                sendBtn.classList.remove("llm-send-icon--stop");
+            }
+        }
+
+        updateSendButtonState();
 
         loadHistory();
     }

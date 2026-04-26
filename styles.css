@@ -144,15 +144,9 @@
 .llm-chat-container .llm-chip--link {
   display: block;
   width: 100%;
-  max-width: 100%;
   padding: 6px 10px;
-  margin: 0;
   border-radius: 12px;
   line-height: 1.35;
-  white-space: normal;
-  overflow-wrap: anywhere;
-  word-break: break-word;
-  box-sizing: border-box;
 }
 
 .llm-chat-container .llm-sources {
@@ -234,6 +228,38 @@
 
 .llm-chip--link:hover {
   text-decoration: underline;
+}
+
+.llm-input:disabled {
+  background: #f1f3f5;
+  cursor: not-allowed;
+}
+
+.llm-send-icon__send,
+.llm-send-icon__stop {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.llm-send-icon__stop {
+  display: none;
+}
+
+.llm-send-icon.llm-send-icon--stop .llm-send-icon__send {
+  display: none;
+}
+
+.llm-send-icon.llm-send-icon--stop .llm-send-icon__stop {
+  display: inline-flex;
+}
+
+.llm-send-icon--stop {
+  background: #dc3545 !important;
+}
+
+.llm-send-icon--stop:hover {
+  background: #bb2d3b !important;
 }
 
 @keyframes llmspin {
