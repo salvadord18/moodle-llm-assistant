@@ -37,7 +37,11 @@ class history_manager {
     public static function load_history($userid, $courseid) {
         global $DB;
 
-        return $DB->get_records('block_llmassistant_msg', ['userid' => $userid, 'courseid' => $courseid], 'timecreated ASC');
+        return $DB->get_records(
+            'block_llmassistant_msg',
+            ['userid' => $userid, 'courseid' => $courseid],
+            'timecreated ASC, id ASC'
+        );
     }
 
     /**

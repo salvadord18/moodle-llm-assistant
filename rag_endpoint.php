@@ -204,6 +204,30 @@ function llmassistant_save_result_snapshot(
     return $filepath;
 }
 
+/**
+ * Saves one assistant message to history.
+ */
+function llmassistant_save_assistant_message(
+    int $userid,
+    int $courseid,
+    string $answer,
+    array $sources = []
+): void {
+    try {
+        $sourcesjson = json_encode($sources, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+
+        \block_llmassistant\local\history_manager::save_message(
+            $userid,
+            $courseid,
+            'assistant',
+            $answer,
+            $sourcesjson
+        );
+    } catch (Throwable $e) {
+        // Do not break the endpoint if history persistence fails.
+    }
+}
+
 @ini_set('display_errors', '0');
 @ini_set('html_errors', '0');
 header('Content-Type: application/json; charset=utf-8');
@@ -240,6 +264,9 @@ try {
             'message' => $row->message ?? '',
         ];
     }
+
+    // Save user message immediately so it is never lost.
+    \block_llmassistant\local\history_manager::save_message($userid, $courseid, 'user', $question);
 
     $requestpayload = [
         'question' => $question,
@@ -279,7 +306,7 @@ try {
             ? llmassistant_localized_text('timeout', $userlang)
             : llmassistant_localized_text('unreachable', $userlang);
 
-        echo json_encode([
+        $out = [
             'answer'  => $answer,
             'sources' => [],
             'debug'   => [
@@ -288,7 +315,11 @@ try {
                 'transport_error_kind' => $isTimeout ? 'timeout' : 'unreachable',
                 'rag_api_url' => $apiurl,
             ],
-        ], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+        ];
+
+        llmassistant_save_assistant_message($userid, $courseid, $answer, []);
+
+        echo json_encode($out, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
         exit;
     }
 
@@ -300,14 +331,20 @@ try {
             ob_clean();
         }
 
-        echo json_encode([
-            'answer'  => llmassistant_localized_text('http_error', $userlang, ['code' => $httpcode]),
+        $answer = llmassistant_localized_text('http_error', $userlang, ['code' => $httpcode]);
+
+        $out = [
+            'answer'  => $answer,
             'sources' => [],
             'debug'   => [
                 'http_code' => $httpcode,
                 'rag_response' => $response,
             ],
-        ], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+        ];
+
+        llmassistant_save_assistant_message($userid, $courseid, $answer, []);
+
+        echo json_encode($out, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
         exit;
     }
 
@@ -318,13 +355,19 @@ try {
             ob_clean();
         }
 
-        echo json_encode([
-            'answer'  => llmassistant_localized_text('invalid_json', $userlang),
+        $answer = llmassistant_localized_text('invalid_json', $userlang);
+
+        $out = [
+            'answer'  => $answer,
             'sources' => [],
             'debug'   => [
                 'rag_response' => $response,
             ],
-        ], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+        ];
+
+        llmassistant_save_assistant_message($userid, $courseid, $answer, []);
+
+        echo json_encode($out, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
         exit;
     }
 
@@ -338,16 +381,11 @@ try {
 
     $sources = $data['sources'] ?? [];
 
-    // Persist the new user turn + assistant turn.
-    \block_llmassistant\local\history_manager::save_message($userid, $courseid, 'user', $question);
-    $sourcesjson = json_encode($sources, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
-
-    \block_llmassistant\local\history_manager::save_message(
+    llmassistant_save_assistant_message(
         $userid,
         $courseid,
-        'assistant',
         $answer,
-        $sourcesjson
+        is_array($sources) ? $sources : []
     );
 
     if (ob_get_length()) {
@@ -410,10 +448,18 @@ try {
         ob_clean();
     }
 
-    echo json_encode([
-        'answer'  => llmassistant_localized_text('server_failed', isset($userlang) ? $userlang : 'en'),
+    $answer = llmassistant_localized_text('server_failed', isset($userlang) ? $userlang : 'en');
+
+    $out = [
+        'answer'  => $answer,
         'sources' => [],
         'debug'   => get_class($e) . ': ' . $e->getMessage(),
-    ], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+    ];
+
+    if (isset($userid, $courseid, $question) && $question !== '') {
+        llmassistant_save_assistant_message($userid, $courseid, $answer, []);
+    }
+
+    echo json_encode($out, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
     exit;
 }
