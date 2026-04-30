@@ -72,11 +72,11 @@ COMPRESS_CONTEXT = os.getenv("LLMASSISTANT_COMPRESS_CONTEXT", "1").lower() in ("
 
 # Priority sources (comma-separated). Default: Lecture1.pdf (course overview/intro).
 PRIORITY_SOURCES = [
-    s.strip() for s in os.getenv("LLMASSISTANT_PRIORITY_SOURCES", "Lecture1.pdf").split(",")
+    s.strip() for s in os.getenv("LLMASSISTANT_PRIORITY_SOURCES", "").split(",")
     if s.strip()
 ]
 SOURCE_BONUS = float(os.getenv("LLMASSISTANT_SOURCE_BONUS", "0.25"))
-PRIORITY_RATIO = float(os.getenv("LLMASSISTANT_PRIORITY_RATIO", "0.5"))
+PRIORITY_RATIO = float(os.getenv("LLMASSISTANT_PRIORITY_RATIO", "0.25"))
 MIN_PRIORITY_CHUNKS = 2  # safety floor
 
 # For contacts/admin questions: boost chunks with real teacher/contact labels, penalize example datasets
@@ -160,6 +160,14 @@ ENTITY_FOLLOWUP_RE = re.compile(
 
 PERSON_NAME_RE = re.compile(
     r"\b[A-ZÀ-Ý][a-zà-ÿ]+(?:[\s-]+[A-ZÀ-Ý][a-zà-ÿ]+){1,3}\b"
+)
+
+DEFINITION_QUESTION_RE = re.compile(
+    r"\b("
+    r"what is|what are|what does .* stand for|define|definition of|"
+    r"o que é|o que sao|o que são|o que significa|define"
+    r")\b",
+    re.IGNORECASE
 )
 
 DB_PREFIX = os.getenv("MOODLE_DB_PREFIX", "m_")
@@ -712,6 +720,9 @@ def is_policy_question(q: str) -> bool:
         "quem se pode", "quem pode", "estatuto especial", "serviços académicos", "servicos academicos"
     ])
     
+def is_definition_question(q: str) -> bool:
+    return bool(DEFINITION_QUESTION_RE.search(q or ""))
+    
 def is_eligibility_question(q: str) -> bool:
     return bool(ELIGIBILITY_QUESTION_RE.search(q or ""))
     
@@ -1053,8 +1064,17 @@ def ask(data: Query):
 
     is_global_scope = (data.courseid == 0)
     no_info_msg = no_info_text(user_lang, is_global_scope)
-
-    effective_priority_sources = [] if is_global_scope else PRIORITY_SOURCES
+    
+    want_contacts = is_contacts_question(q_for_retrieval)
+    want_policy = is_policy_question(q_for_retrieval)
+    want_eligibility = is_eligibility_question(q_for_retrieval)
+    want_definition = is_definition_question(q_for_retrieval)
+    
+    effective_priority_sources = (
+        PRIORITY_SOURCES
+        if (not is_global_scope and (want_contacts or want_policy) and not want_definition)
+        else []
+    )
 
     try:
         source_courseid = resolve_global_source_course_id() if is_global_scope else int(data.courseid)
@@ -1085,8 +1105,8 @@ def ask(data: Query):
     if q_kw and q_kw.lower() != q_for_retrieval.lower():
         queries.append(q_kw)
 
-    q2 = ""  
-    if ENABLE_QUERY_REWRITE:
+    q2 = ""
+    if ENABLE_QUERY_REWRITE and not want_definition:
         q2 = ollama_rewrite_query_global(q_for_retrieval) if is_global_scope else ollama_rewrite_query_course(q_for_retrieval)
         if q2 and q2.lower() not in [x.lower() for x in queries]:
             queries.append(q2)
@@ -1111,16 +1131,14 @@ def ask(data: Query):
     all_dists = results.get("distances") or []
     
     retrieval_ms = round((time.perf_counter() - t0_retrieval) * 1000, 1)
-
-    want_contacts = is_contacts_question(q_for_retrieval)
-    want_policy = is_policy_question(q_for_retrieval)
-    want_eligibility = is_eligibility_question(q_for_retrieval)
     
     additive_followup = want_contacts and is_additive_followup(q)
     known_names, known_emails = extract_known_contact_entities(data.history) if want_contacts else (set(), set())
     
     if want_contacts:
         MAX_CHUNKS_LOCAL = 8
+    elif want_definition:
+        MAX_CHUNKS_LOCAL = 6
     else:
         MAX_CHUNKS_LOCAL = MAX_CHUNKS
 
@@ -1169,11 +1187,11 @@ def ask(data: Query):
                     score += contact_novelty_bonus(doc, known_names, known_emails)
 
             # Canonical priority-source boosts
-            if want_policy and is_priority_source(src, effective_priority_sources):
-                score += 0.30
-
-            if is_priority_source(src, effective_priority_sources):
-                score += SOURCE_BONUS * 2
+            if effective_priority_sources and is_priority_source(src, effective_priority_sources):
+                if want_policy:
+                    score += 0.15
+                else:
+                    score += SOURCE_BONUS
 
             k = doc_key(doc, meta)
             cur = merged.get(k)
@@ -1235,10 +1253,30 @@ def ask(data: Query):
 
     candidates.sort(key=lambda x: (-x[3], x[2]))
     best_dist = min([c[2] for c in candidates]) if candidates else None
+    top_doc, top_meta, top_dist, top_score = candidates[0]
+    top_lex = lexical_overlap_score(q_mix, top_doc)
+    top_policy_quality = policy_chunk_quality(top_doc, top_meta, q_for_retrieval, is_global_scope=is_global_scope) if (want_policy or is_global_scope) else 0.0
 
     threshold = CONTACT_DISTANCE_THRESHOLD if want_contacts else GENERIC_DISTANCE_THRESHOLD
 
+    reject = False
+
     if best_dist > threshold:
+        reject = True
+
+    # Additional safety for definition questions: require at least some lexical support.
+    if want_definition and top_lex < 0.12:
+        reject = True
+
+    # Additional safety for global/policy mode: require some policy-quality evidence.
+    if (want_policy or is_global_scope) and top_policy_quality <= 0:
+        reject = True
+
+    # Additional safety for weak top candidates.
+    if top_score < 0.18:
+        reject = True
+
+    if reject:
         candidates = candidates[:10]
         resp = {"answer": no_info_msg, "sources": []}
         if DEBUG:
@@ -1248,6 +1286,9 @@ def ask(data: Query):
                 "collection_name": collection_name,
                 "min_dist": best_dist,
                 "threshold": threshold,
+                "top_score": top_score,
+                "top_lex": top_lex,
+                "top_policy_quality": top_policy_quality,
                 "queries": queries,
                 "top_sources": sorted(seen_sources)[:10]
             }
