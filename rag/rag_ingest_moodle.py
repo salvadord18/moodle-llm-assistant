@@ -63,6 +63,29 @@ ASSESSMENT_RE = re.compile(r"\b(assessment|exam|grade|grading|evaluation|criteri
 SCHEDULE_RE = re.compile(r"\b(schedule|calendar|week\s*\d+|session|timeline|plan|agenda|date)\b", re.I)
 EXAMPLE_RE = re.compile(r"\b(example|exercise|case study|dataset|sample|patients?|orders?|appointments?|payment)\b", re.I)
 
+DR_HEADER_RE = re.compile(
+    r"di[aá]rio da rep[uú]blica|www\.dre\.pt",
+    re.I
+)
+
+REGULATION_START_RE = re.compile(
+    r"(anexo\s+regulamento|regulamento\s+n\.º\s*\d+/\d+|regulamento\s+do|regulamento\s+de)",
+    re.I
+)
+
+ARTICLE_RE = re.compile(r"^\s*Artigo\s+\d+\.º", re.I | re.M)
+CHAPTER_RE = re.compile(r"^\s*CAP[IÍ]TULO\s+[IVXLC]+", re.I | re.M)
+
+NEW_DIPLOMA_RE = re.compile(
+    r"^\s*(Regulamento\s+n\.º\s*\d+/\d+|Despacho\s+n\.º\s*\d+/\d+|Aviso.*n\.º\s*\d+/\d+)",
+    re.I
+)
+
+DEADLINE_RE = re.compile(
+    r"\b(prazo|prazos|30 dias|60 dias|60 dias úteis|30 dias úteis|até 15 de julho|até 31 de janeiro|até ao final do mês de setembro)\b",
+    re.I
+)
+
 # -----------------------------
 # HELPERS
 # -----------------------------
@@ -75,17 +98,97 @@ def normalize(text: str) -> str:
             cleaned.append(line)
     return "\n".join(cleaned)
 
+def remove_running_headers_footers(text: str) -> str:
+    lines = []
+    for raw in normalize(text).splitlines():
+        line = raw.strip()
+
+        if not line:
+            continue
+
+        if DR_HEADER_RE.search(line):
+            continue
+
+        if re.search(r"^N\.º\s+\d+", line, re.I):
+            continue
+
+        if re.search(r"^Pág\.", line, re.I):
+            continue
+
+        lines.append(line)
+
+    return "\n".join(lines)
+
+
+def normalize_deadline_rules(text: str) -> str:
+    """
+    Canonicalize common deadline/defense rules that may come from table-like layouts.
+    """
+    text = normalize(text)
+
+    text = re.sub(
+        r"Entrega até 15 de julho\s+Defesa no mês de outubro",
+        "Entrega até 15 de julho -> Defesa no mês de outubro",
+        text,
+        flags=re.I
+    )
+
+    text = re.sub(
+        r"Entrega até 31 de janeiro.*?Defesa no mês de abril",
+        "Entrega até 31 de janeiro -> Defesa no mês de abril",
+        text,
+        flags=re.I | re.S
+    )
+
+    return text
+
+
+def trim_legal_document(page_texts: List[Tuple[int, str]]) -> List[Tuple[int, str]]:
+    """
+    Keep only the main regulation body in Diário da República-style PDFs.
+    Start when regulation-like content begins; stop if another diploma starts later.
+    """
+    trimmed = []
+    started = False
+
+    for page_num, text in page_texts:
+        t = normalize(text)
+
+        if not started:
+            if REGULATION_START_RE.search(t) or ARTICLE_RE.search(t) or CHAPTER_RE.search(t):
+                started = True
+                trimmed.append((page_num, t))
+            continue
+
+        # stop if another regulation/diploma starts after the relevant one
+        if NEW_DIPLOMA_RE.search(t) and not ARTICLE_RE.search(t):
+            break
+
+        trimmed.append((page_num, t))
+
+    return trimmed if trimmed else page_texts
 
 def infer_section_type(text: str) -> str:
     tl = (text or "").lower()
+
     if CONTACT_RE.search(tl):
         return "contact"
+
+    if DEADLINE_RE.search(tl):
+        return "deadline"
+
+    if ARTICLE_RE.search(text or "") or CHAPTER_RE.search(text or ""):
+        return "regulation"
+
     if ASSESSMENT_RE.search(tl):
         return "assessment"
+
     if SCHEDULE_RE.search(tl):
         return "schedule"
+
     if EXAMPLE_RE.search(tl):
         return "example"
+
     return "concept"
 
 
@@ -146,6 +249,58 @@ def split_into_structured_blocks(page_text: str, max_chars: int = MAX_BLOCK_CHAR
             start = max(0, end - overlap)
 
     return final_blocks
+
+def split_into_legal_blocks(page_text: str) -> List[Dict]:
+    """
+    Split legal/regulatory text by chapter/article headings.
+    Returns structured blocks with legal metadata.
+    """
+    text = normalize(page_text)
+    if not text:
+        return []
+
+    lines = text.splitlines()
+    blocks = []
+
+    current_lines = []
+    current_article = ""
+    current_title = ""
+    current_chapter = ""
+
+    def flush():
+        nonlocal current_lines, current_article, current_title, current_chapter
+        body = "\n".join(current_lines).strip()
+        if len(body) >= MIN_TEXT_CHARS:
+            blocks.append({
+                "text": body,
+                "article_number": current_article,
+                "article_title": current_title,
+                "chapter_title": current_chapter,
+            })
+        current_lines = []
+
+    for line in lines:
+        s = line.strip()
+
+        if CHAPTER_RE.match(s):
+            flush()
+            current_chapter = s
+            current_article = ""
+            current_title = ""
+            current_lines = [s]
+            continue
+
+        if ARTICLE_RE.match(s):
+            flush()
+            current_article = s
+            current_title = s
+            current_lines = [s]
+            continue
+
+        current_lines.append(s)
+
+    flush()
+    return blocks
 
 
 def page_title_hint(page_text: str) -> str:
@@ -233,17 +388,23 @@ def get_course_pdfs(courseid: int) -> List[Tuple[str, str, int]]:
 
 def get_collection_for_course(chroma_client: PersistentClient, courseid: int):
     name = f"course_docs_{courseid}"
+
     if RESET_COLLECTION:
         try:
             chroma_client.delete_collection(name)
             print(f"[INFO] Deleted existing collection: {name}")
         except Exception:
             pass
+
     collection = chroma_client.get_or_create_collection(
         name=name,
         embedding_function=DefaultEmbeddingFunction(),
-        metadata={"courseid": courseid, "kind": "moodle_course_docs"},
+        metadata={
+            "courseid": courseid,
+            "kind": "moodle_course_docs",
+        },
     )
+
     return name, collection
 
 
@@ -253,18 +414,25 @@ def pdf_path_from_hash(contenthash: str) -> str:
 
 def extract_page_texts(pdf_path: str) -> List[Tuple[int, str]]:
     page_texts = []
+
     with fitz.open(pdf_path) as doc:
         for idx, page in enumerate(doc, start=1):
             blocks = page.get_text("blocks") or []
             lines = []
+
             for b in blocks:
                 if len(b) >= 5:
                     text = b[4]
                     if text and text.strip():
                         lines.append(text.strip())
+
             text = normalize("\n".join(lines))
+            text = remove_running_headers_footers(text)
+            text = normalize_deadline_rules(text)
+
             if text:
                 page_texts.append((idx, text))
+
     return page_texts
 
 
@@ -280,12 +448,20 @@ def build_records_for_pdf(courseid: int, contenthash: str, filename: str, contex
 
     try:
         page_texts = extract_page_texts(pdf_path)
+        page_texts = trim_legal_document(page_texts)
     except Exception as exc:
         print(f"[WARN] Could not parse {filename}: {exc}")
         return [], [], []
 
     for page_num, page_text in page_texts:
         title_hint = page_title_hint(page_text)
+
+        is_legal_like = bool(
+            REGULATION_START_RE.search(page_text)
+            or ARTICLE_RE.search(page_text)
+            or CHAPTER_RE.search(page_text)
+        )
+
         # PAGE-LEVEL FALLBACK CHUNK
         page_rec_id = f"{contenthash}:p{page_num}:page"
         ids.append(page_rec_id)
@@ -300,23 +476,41 @@ def build_records_for_pdf(courseid: int, contenthash: str, filename: str, contex
             "title_hint": title_hint,
             "contenthash": contenthash,
             "chunk_type": "page",
+            "doc_kind": "regulation" if is_legal_like else "generic_pdf",
+            "article_number": "",
+            "article_title": "",
+            "chapter_title": "",
         })
-        blocks = split_into_structured_blocks(page_text)
+
+        if is_legal_like:
+            blocks = split_into_legal_blocks(page_text)
+        else:
+            blocks = [{"text": b} for b in split_into_structured_blocks(page_text)]
+
         for chunk_index, block in enumerate(blocks):
+            chunk_text = (block.get("text", "") or "").strip()
+            if len(chunk_text) < MIN_TEXT_CHARS:
+                continue
+
             rec_id = f"{contenthash}:p{page_num}:c{chunk_index}"
             ids.append(rec_id)
-            docs.append(block)
+            docs.append(chunk_text)
             metas.append({
                 "courseid": int(courseid),
                 "source": filename,
                 "page": int(page_num),
                 "chunk_index": int(chunk_index),
                 "contextlevel": int(contextlevel),
-                "section_type": infer_section_type(block),
+                "section_type": infer_section_type(chunk_text),
                 "title_hint": title_hint,
                 "contenthash": contenthash,
-                "chunk_type": "block",
+                "chunk_type": "article" if is_legal_like else "block",
+                "doc_kind": "regulation" if is_legal_like else "generic_pdf",
+                "article_number": block.get("article_number", ""),
+                "article_title": block.get("article_title", ""),
+                "chapter_title": block.get("chapter_title", ""),
             })
+
     return ids, docs, metas
 
 
@@ -339,7 +533,7 @@ def ingest_course(chroma_client: PersistentClient, courseid: int) -> None:
         print(f"  [OK] {filename}: {len(ids)} chunk(s)")
 
     print(f"[DONE] course={courseid} total_chunks={total_chunks}")
-
+    
 
 # -----------------------------
 # MAIN
