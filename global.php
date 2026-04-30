@@ -10,7 +10,8 @@ $PAGE->set_url(new moodle_url('/blocks/llmassistant/global.php'));
 $PAGE->set_context(context_system::instance());
 $PAGE->set_pagelayout('mydashboard');
 $PAGE->set_title('LLM Academic Regulations Assistant');
-$PAGE->set_heading('LLM Academic Regulations Assistant');
+$PAGE->set_heading('');
+$PAGE->add_body_class('llm-page-fullscreen');
 
 $apiurl = (new moodle_url('/blocks/llmassistant/rag_endpoint.php'))->out(false);
 $historyurl = (new moodle_url('/blocks/llmassistant/history_endpoint.php'))->out(false);
@@ -18,7 +19,7 @@ $sourcebaseurl = $CFG->wwwroot . '/blocks/llmassistant/source_file.php/';
 
 $cfg = [
     'containerid'       => 'llm_chat_global',
-    'containerclasses'  => 'llm-center-wrap',
+    'containerclasses'  => 'llm-chat-container llm-chat-container--fullpage',
     'title'             => 'LLM Assistant',
     'subtitle'          => 'Academic services regulations, rules and deadlines',
     'showopenbutton'    => false,
@@ -45,15 +46,13 @@ $cfg = [
 echo $OUTPUT->header();
 ?>
 
-<div class="llm-center-wrap">
-  <div class="llm-card">
-    <?php
-    echo $OUTPUT->render_from_template(
-        'block_llmassistant/chat_ui',
-        chat_ui::template_context($cfg)
-    );
-    ?>
-  </div>
+<div class="llm-page-shell">
+  <?php
+  echo $OUTPUT->render_from_template(
+      'block_llmassistant/chat_ui',
+      chat_ui::template_context($cfg)
+  );
+  ?>
 </div>
 
 <?php

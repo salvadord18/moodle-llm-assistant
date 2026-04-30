@@ -15,6 +15,7 @@ $PAGE->set_context($context);
 $PAGE->set_pagelayout('course');
 $PAGE->set_title('LLM Course Assistant');
 $PAGE->set_heading($course->fullname);
+$PAGE->add_body_class('llm-page-coursechat');
 
 $apiurl = (new moodle_url('/blocks/llmassistant/rag_endpoint.php'))->out(false);
 $historyurl = (new moodle_url('/blocks/llmassistant/history_endpoint.php'))->out(false);
@@ -22,9 +23,9 @@ $sourcebaseurl = $CFG->wwwroot . '/blocks/llmassistant/source_file.php/';
 
 $cfg = [
     'containerid'       => 'llm_chat_page',
-    'containerclasses'  => 'llm-center-wrap',
+    'containerclasses'  => 'llm-chat-container llm-chat-container--coursepage',
     'title'             => 'LLM Assistant',
-    'subtitle'          => '',
+    'subtitle'          => 'Course materials, assessment and questions for ' . $course->fullname,
     'showopenbutton'    => false,
     'openbuttonid'      => '',
     'clearbuttonid'     => 'llm_clear',
@@ -49,15 +50,13 @@ $cfg = [
 echo $OUTPUT->header();
 ?>
 
-<div class="llm-center-wrap">
-  <div class="llm-card">
-    <?php
-    echo $OUTPUT->render_from_template(
-        'block_llmassistant/chat_ui',
-        chat_ui::template_context($cfg)
-    );
-    ?>
-  </div>
+<div class="llm-page-shell">
+  <?php
+  echo $OUTPUT->render_from_template(
+      'block_llmassistant/chat_ui',
+      chat_ui::template_context($cfg)
+  );
+  ?>
 </div>
 
 <?php

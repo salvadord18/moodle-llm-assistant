@@ -40,6 +40,25 @@ define(['core/log'], function(Log) {
         }
 
         /**
+         * Resizes the input automatically up to a maximum height.
+         */
+        function autoResizeInput() {
+            const maxHeight = 160;
+
+            input.style.height = "auto";
+            input.style.height = Math.min(input.scrollHeight, maxHeight) + "px";
+            input.style.overflowY = input.scrollHeight > maxHeight ? "auto" : "hidden";
+        }
+
+        /**
+         * Resets the input to its initial single-line height.
+         */
+        function resetInputHeight() {
+            input.style.height = "48px";
+            input.style.overflowY = "hidden";
+        }
+
+        /**
          * Add a simple message to the chat.
          *
          * @param {string} text Text of the message.
@@ -268,6 +287,7 @@ define(['core/log'], function(Log) {
 
             addMessage(q, "user");
             input.value = "";
+            resetInputHeight();
 
             currentThinkingEl = addThinking();
 
@@ -373,6 +393,8 @@ define(['core/log'], function(Log) {
             }
         });
 
+        input.addEventListener("input", autoResizeInput);
+
         /**
          * Updates send button appearance/meaning depending on busy state.
          */
@@ -391,6 +413,8 @@ define(['core/log'], function(Log) {
         }
 
         updateSendButtonState();
+
+        resetInputHeight();
 
         loadHistory();
     }

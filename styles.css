@@ -130,20 +130,8 @@
   box-sizing: border-box;
 }
 
-/* ---------------------------------------------------------
-   Sidebar block: stack source links vertically
-   --------------------------------------------------------- */
-.llm-chat-container .llm-sources > div:last-child {
-  display: flex;
-  flex-direction: column;
-  align-items: stretch;
-  gap: 6px;
-}
-
 .llm-chat-container .llm-chip,
 .llm-chat-container .llm-chip--link {
-  display: block;
-  width: 100%;
   padding: 6px 10px;
   border-radius: 12px;
   line-height: 1.35;
@@ -174,9 +162,10 @@
 
 .llm-input {
   flex: 1;
-  min-height: 72px;
-  height: 72px;
-  padding: 14px 16px;
+  min-height: 48px;
+  height: 48px;
+  max-height: 160px;
+  padding: 12px 16px;
   border-radius: 14px;
   border: 1px solid #c6cbd1;
   resize: none;
@@ -184,7 +173,7 @@
   font-size: 15px;
   line-height: 1.4;
   box-sizing: border-box;
-  overflow-y: auto;
+  overflow-y: hidden;
 }
 
 .llm-send-icon {
@@ -260,6 +249,98 @@
 
 .llm-send-icon--stop:hover {
   background: #bb2d3b !important;
+}
+
+/* =========================================================
+   Expanded chat pages
+   ========================================================= */
+
+.llm-page-shell {
+  width: 100%;
+  max-width: none;
+  margin: 0;
+}
+
+/* Global expanded chat */
+body.llm-page-fullscreen #page-header,
+body.llm-page-fullscreen .page-header-headings,
+body.llm-page-fullscreen .page-context-header,
+body.llm-page-fullscreen .secondary-navigation,
+body.llm-page-fullscreen .tertiary-navigation {
+  display: none;
+}
+
+body.llm-page-fullscreen .main-inner,
+body.llm-page-fullscreen #region-main-box,
+body.llm-page-fullscreen #region-main,
+body.llm-page-fullscreen .llm-page-shell {
+  margin: 0;
+  padding: 0;
+}
+
+body.llm-page-fullscreen .main-inner {
+  max-width: none;
+  padding-left: 12px;
+  padding-right: 12px;
+  padding-top: 8px;
+}
+
+body.llm-page-fullscreen #region-main {
+  display: flex;
+  flex-direction: column;
+}
+
+body.llm-page-fullscreen .llm-page-shell {
+  display: flex;
+  flex-direction: column;
+  flex: 1 1 auto;
+}
+
+body.llm-page-fullscreen .llm-chat-container--fullpage {
+  width: 100%;
+  max-width: none;
+  height: calc(100dvh - 96px);
+  max-height: calc(100dvh - 96px);
+  min-height: 640px;
+  border: 1px solid #d0d7de;
+  border-radius: 12px;
+}
+
+body.llm-page-fullscreen .llm-page-shell {
+  margin-top: -34px;
+}
+
+body.llm-page-fullscreen .llm-chat-window--expanded {
+  flex: 1;
+  height: auto;
+  min-height: 0;
+  max-height: none;
+}
+
+body.llm-page-fullscreen .llm-msg-user,
+body.llm-page-fullscreen .llm-msg-bot {
+  max-width: 92%;
+}
+
+/* Course expanded chat */
+body.llm-page-coursechat .llm-chat-container--coursepage {
+  width: 100%;
+  max-width: none;
+  height: calc(100dvh - 240px);
+  max-height: calc(100dvh - 240px);
+  min-height: 640px;
+}
+
+body.llm-page-coursechat .llm-chat-window--expanded {
+  flex: 1;
+  height: auto;
+  min-height: 0;
+  max-height: none;
+}
+
+body.llm-page-coursechat .llm-msg-user,
+body.llm-page-coursechat .llm-msg-bot {
+  max-width: 92%;
 }
 
 @keyframes llmspin {
