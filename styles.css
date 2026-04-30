@@ -41,6 +41,11 @@
   align-items: center;
 }
 
+.llm-ai-mark svg {
+  width: 22px;
+  height: 22px;
+}
+
 .llm-title {
   display: flex;
   align-items: center;
@@ -277,6 +282,117 @@
 
 .llm-send-icon--stop:hover {
   background: #bb2d3b !important;
+}
+
+/* =========================================================
+   Moodle block mode
+   ========================================================= */
+
+.block_llmassistant .card-header .card-title,
+.block_llmassistant .header .title,
+.block_llmassistant .block-title,
+.block_llmassistant .card-header h2,
+.block_llmassistant .header h2 {
+  display: none !important;
+  margin: 0 !important;
+  padding: 0 !important;
+  min-height: 0 !important;
+}
+
+/* Make the Moodle block header float above the chat instead of reserving space */
+.block_llmassistant .card,
+.block_llmassistant .block {
+  position: relative;
+}
+
+.block_llmassistant .card-header,
+.block_llmassistant .header {
+  position: absolute;
+  top: 6px;
+  right: 8px;
+  left: auto;
+  z-index: 20;
+
+  width: auto;
+  min-height: 0;
+  height: auto;
+
+  margin: 0 !important;
+  padding: 0 !important;
+
+  background: transparent !important;
+  border: 0 !important;
+  box-shadow: none !important;
+
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+
+  overflow: visible;
+}
+
+.block_llmassistant,
+.block_llmassistant .card,
+.block_llmassistant .card-body,
+.block_llmassistant .content,
+.block_llmassistant .block-content {
+  overflow: hidden !important;
+}
+
+.block_llmassistant .card-body,
+.block_llmassistant .content,
+.block_llmassistant .block-content,
+.block_llmassistant .card-text {
+  padding: 0 !important;
+  margin: 0 !important;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  height: auto;
+  max-height: calc(100vh - 180px);
+  overflow: hidden !important;
+}
+
+/* Chat fills the block itself instead of creating an inner framed card */
+.llm-chat-container--block {
+  width: 100%;
+  max-width: none;
+  height: calc(100vh - 150px);
+  max-height: calc(100vh - 150px);
+  min-height: 0;
+  margin-top: 0;
+
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  overflow: hidden;
+}
+
+/* Make only the conversation scroll */
+.llm-chat-container--block .llm-chat-window {
+  padding: 10px;
+  overflow-y: auto;
+  overflow-x: hidden;
+  min-height: 0;
+}
+
+.llm-chat-container--block .llm-chat-inputwrap {
+  padding: 10px;
+}
+
+.llm-chat-container--block .llm-header {
+  padding: 8px 10px;
+  border-radius: 0;
+}
+
+.llm-chat-container--block .llm-input-row,
+.llm-chat-container--block .llm-chat-inputwrap {
+  border-radius: 0;
+}
+
+.llm-chat-container--block .llm-msg-user,
+.llm-chat-container--block .llm-msg-bot {
+  max-width: 100%;
 }
 
 /* =========================================================

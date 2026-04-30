@@ -91,7 +91,7 @@ class block_llmassistant extends block_base {
 
         $cfg = [
             'containerid'       => 'llm_chat_' . $uid,
-            'containerclasses'  => 'llm-chat-container',
+            'containerclasses'  => 'llm-chat-container llm-chat-container--block',
             'title'             => 'LLM Assistant',
             'subtitle'          => '',
             'showopenbutton'    => true,
