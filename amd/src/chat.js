@@ -129,6 +129,7 @@ define(['core/log'], function(Log) {
             wrap.className = "llm-msg-bot";
 
             const text = document.createElement("div");
+            text.className = "llm-msg-body";
             text.innerHTML = DOMPurify.sanitize(marked.parse(answer));
             wrap.appendChild(text);
 

@@ -236,6 +236,158 @@ function llmassistant_is_no_info_answer(string $answer): bool {
 }
 
 /**
+ * Converts source entries to one CSV-friendly string.
+ *
+ * @param mixed $sources
+ * @return string
+ */
+function llmassistant_sources_to_csv_text($sources): string {
+    if (!is_array($sources) || empty($sources)) {
+        return '';
+    }
+
+    $labels = [];
+
+    foreach ($sources as $s) {
+        if (is_string($s)) {
+            $label = trim($s);
+            if ($label !== '') {
+                $labels[] = $label;
+            }
+            continue;
+        }
+
+        if (is_array($s)) {
+            $source = trim((string)($s['source'] ?? ''));
+            $page = isset($s['page']) && $s['page'] !== null && $s['page'] !== ''
+                ? ' (p. ' . $s['page'] . ')'
+                : '';
+
+            $label = trim($source . $page);
+            if ($label !== '') {
+                $labels[] = $label;
+            }
+        }
+    }
+
+    return implode(' | ', $labels);
+}
+
+/**
+ * Rebuilds the summary CSV from all saved JSON result snapshots.
+ */
+function llmassistant_rebuild_result_summary_csv(): ?string {
+    $base = llmassistant_results_base_dir();
+    $csvpath = $base . '/all_results_summary.csv';
+
+    $rows = [];
+
+    $iterator = new RecursiveIteratorIterator(
+        new RecursiveDirectoryIterator($base, FilesystemIterator::SKIP_DOTS)
+    );
+
+    foreach ($iterator as $fileinfo) {
+        if (!$fileinfo->isFile()) {
+            continue;
+        }
+
+        if (core_text::strtolower($fileinfo->getExtension()) !== 'json') {
+            continue;
+        }
+
+        $filepath = $fileinfo->getPathname();
+
+        $content = @file_get_contents($filepath);
+        if ($content === false || trim($content) === '') {
+            continue;
+        }
+
+        $data = json_decode($content, true);
+        if (!is_array($data)) {
+            continue;
+        }
+
+        $final = $data['final_response'] ?? [];
+        $debug = $final['debug'] ?? [];
+
+        $timingphp = (is_array($debug) && !empty($debug['timing_php_ms']) && is_array($debug['timing_php_ms']))
+            ? $debug['timing_php_ms']
+            : [];
+
+        $timingrag = (is_array($debug) && !empty($debug['timing_ms']) && is_array($debug['timing_ms']))
+            ? $debug['timing_ms']
+            : [];
+
+        $answer = trim((string)($final['answer'] ?? ''));
+        $sources = $final['sources'] ?? [];
+
+        $rows[] = [
+            'file' => ltrim(str_replace($base, '', $filepath), DIRECTORY_SEPARATOR),
+            'saved_at' => $data['saved_at'] ?? '',
+            'courseid' => $data['courseid'] ?? '',
+            'userid' => $data['userid'] ?? '',
+            'question' => $data['question'] ?? '',
+            'answer' => $answer,
+            'sources' => llmassistant_sources_to_csv_text($sources),
+            'timing_php_total_ms' => $timingphp['total'] ?? '',
+            'timing_rag_total_ms' => $timingrag['total'] ?? '',
+            'timing_generation_ms' => $timingrag['generation'] ?? '',
+            'no_info' => llmassistant_is_no_info_answer($answer) ? 'True' : 'False',
+        ];
+    }
+
+    // Sort by saved_at ascending, then by file path for stability.
+    usort($rows, function($a, $b) {
+        $ta = $a['saved_at'] ?? '';
+        $tb = $b['saved_at'] ?? '';
+
+        if ($ta === $tb) {
+            return strcmp((string)$a['file'], (string)$b['file']);
+        }
+
+        return strcmp((string)$ta, (string)$tb);
+    });
+
+    $fh = fopen($csvpath, 'w');
+    if (!$fh) {
+        throw new \RuntimeException('Could not open summary CSV for rebuilding: ' . $csvpath);
+    }
+
+    try {
+        if (!flock($fh, LOCK_EX)) {
+            throw new \RuntimeException('Could not lock summary CSV for rebuilding: ' . $csvpath);
+        }
+
+        $header = [
+            'file',
+            'saved_at',
+            'courseid',
+            'userid',
+            'question',
+            'answer',
+            'sources',
+            'timing_php_total_ms',
+            'timing_rag_total_ms',
+            'timing_generation_ms',
+            'no_info',
+        ];
+
+        fputcsv($fh, $header);
+
+        foreach ($rows as $row) {
+            fputcsv($fh, $row);
+        }
+
+        fflush($fh);
+        flock($fh, LOCK_UN);
+    } finally {
+        fclose($fh);
+    }
+
+    return $csvpath;
+}
+
+/**
  * Appends one evaluation row to the summary CSV.
  */
 function llmassistant_append_result_summary_csv(
@@ -267,16 +419,14 @@ function llmassistant_append_result_summary_csv(
         'userid' => $userid,
         'question' => $question,
         'answer' => $answer,
-        'sources' => is_array($sources) ? implode(' | ', $sources) : '',
+        'sources' => llmassistant_sources_to_csv_text($sources),
         'timing_php_total_ms' => $timingphp['total'] ?? '',
         'timing_rag_total_ms' => $timingrag['total'] ?? '',
         'timing_generation_ms' => $timingrag['generation'] ?? '',
         'no_info' => llmassistant_is_no_info_answer($answer) ? 'True' : 'False',
     ];
 
-    $writeheader = !file_exists($csvpath) || filesize($csvpath) === 0;
-
-    $fh = fopen($csvpath, 'a');
+    $fh = fopen($csvpath, 'a+');
     if (!$fh) {
         throw new \RuntimeException('Could not open summary CSV for writing: ' . $csvpath);
     }
@@ -285,6 +435,9 @@ function llmassistant_append_result_summary_csv(
         if (!flock($fh, LOCK_EX)) {
             throw new \RuntimeException('Could not lock summary CSV: ' . $csvpath);
         }
+
+        $stat = fstat($fh);
+        $writeheader = ($stat['size'] === 0);
 
         if ($writeheader) {
             fputcsv($fh, array_keys($row));
@@ -523,13 +676,19 @@ try {
                 $out
             );
 
-            $csvfile = llmassistant_append_result_summary_csv(
-                $savedfile,
-                $userid,
-                $courseid,
-                $question,
-                $out
-            );
+            $csvpath = llmassistant_results_base_dir() . '/all_results_summary.csv';
+
+            if (!file_exists($csvpath) || filesize($csvpath) === 0) {
+                $csvfile = llmassistant_rebuild_result_summary_csv();
+            } else {
+                $csvfile = llmassistant_append_result_summary_csv(
+                    $savedfile,
+                    $userid,
+                    $courseid,
+                    $question,
+                    $out
+                );
+            }
 
             if (!isset($out['debug']) || !is_array($out['debug'])) {
                 $out['debug'] = [];

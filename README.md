@@ -352,3 +352,116 @@ uvicorn rag_api:app --host 0.0.0.0 --port 8001
 # BUILD
 cd ~/dev/moodle-lab/moodle
 npx grunt amd
+
+# PYTHON SCRIPT TO CREATE CSV
+
+cd moodle-docker/llmassistant_results
+
+python3 - <<'PY'
+import json
+import csv
+from pathlib import Path
+from datetime import datetime
+
+base = Path(".")
+json_files = sorted(base.rglob("*.json"))
+
+rows = []
+
+def is_no_info(answer: str) -> bool:
+    a = (answer or "").strip().lower()
+    return (
+        "não encontrei" in a or
+        "nao encontrei" in a or
+        "i couldn't find" in a or
+        "the provided pdfs do not contain this information" in a or
+        "the provided course pdfs do not contain this information" in a or
+        "the provided global documents do not contain this information" in a
+    )
+
+def sources_to_text(sources):
+    if not isinstance(sources, list):
+        return ""
+    labels = []
+    for s in sources:
+        if isinstance(s, str):
+            label = s.strip()
+            if label:
+                labels.append(label)
+        elif isinstance(s, dict):
+            source = str(s.get("source", "")).strip()
+            page = s.get("page", None)
+            if source:
+                if page not in (None, ""):
+                    labels.append(f"{source} (p. {page})")
+                else:
+                    labels.append(source)
+    return " | ".join(labels)
+
+for jf in json_files:
+    # skip the CSV if you accidentally have json-like other files
+    if jf.name == "all_results_summary.json":
+        continue
+
+    try:
+        with jf.open("r", encoding="utf-8") as f:
+            data = json.load(f)
+    except Exception:
+        continue
+
+    final = data.get("final_response", {}) or {}
+    debug = final.get("debug", {}) or {}
+
+    timing_php = debug.get("timing_php_ms", {}) if isinstance(debug, dict) else {}
+    timing_rag = debug.get("timing_ms", {}) if isinstance(debug, dict) else {}
+
+    answer = str(final.get("answer", "")).strip()
+    sources = final.get("sources", [])
+
+    rows.append({
+        "file": str(jf.relative_to(base)).replace("\\", "/"),
+        "saved_at": data.get("saved_at", ""),
+        "courseid": data.get("courseid", ""),
+        "userid": data.get("userid", ""),
+        "question": data.get("question", ""),
+        "answer": answer,
+        "sources": sources_to_text(sources),
+        "timing_php_total_ms": timing_php.get("total", ""),
+        "timing_rag_total_ms": timing_rag.get("total", ""),
+        "timing_generation_ms": timing_rag.get("generation", ""),
+        "no_info": "True" if is_no_info(answer) else "False",
+    })
+
+# sort by saved_at if present
+def sort_key(r):
+    try:
+        return datetime.fromisoformat(r["saved_at"].replace("Z", "+00:00"))
+    except Exception:
+        return datetime.min
+
+rows.sort(key=sort_key)
+
+csv_path = base / "all_results_summary.csv"
+
+with csv_path.open("w", newline="", encoding="utf-8") as f:
+    writer = csv.DictWriter(
+        f,
+        fieldnames=[
+            "file",
+            "saved_at",
+            "courseid",
+            "userid",
+            "question",
+            "answer",
+            "sources",
+            "timing_php_total_ms",
+            "timing_rag_total_ms",
+            "timing_generation_ms",
+            "no_info",
+        ]
+    )
+    writer.writeheader()
+    writer.writerows(rows)
+
+print(f"Rebuilt {csv_path} with {len(rows)} rows.")
+PY
