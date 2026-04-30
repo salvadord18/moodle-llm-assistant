@@ -157,7 +157,7 @@
   padding: 12px;
   background: #f8f9fa;
   border-top: 1px solid #d0d7de;
-  align-items: center;
+  align-items: flex-end;
 }
 
 .llm-input {

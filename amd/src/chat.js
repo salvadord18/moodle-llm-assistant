@@ -40,22 +40,45 @@ define(['core/log'], function(Log) {
         }
 
         /**
+         * Checks whether the chat window is currently near the bottom.
+         *
+         * @param {number} threshold Allowed distance from the bottom in pixels.
+         * @returns {boolean} True if the user is near the bottom.
+         */
+        function isNearBottom(threshold) {
+            const t = threshold || 80;
+            const distance = chatWindow.scrollHeight - chatWindow.scrollTop - chatWindow.clientHeight;
+            return distance <= t;
+        }
+
+        /**
          * Resizes the input automatically up to a maximum height.
          */
         function autoResizeInput() {
             const maxHeight = 160;
+            const shouldStickToBottom = isNearBottom();
 
             input.style.height = "auto";
             input.style.height = Math.min(input.scrollHeight, maxHeight) + "px";
             input.style.overflowY = input.scrollHeight > maxHeight ? "auto" : "hidden";
+
+            if (shouldStickToBottom) {
+                window.requestAnimationFrame(scrollToBottom);
+            }
         }
 
         /**
          * Resets the input to its initial single-line height.
          */
         function resetInputHeight() {
+            const shouldStickToBottom = isNearBottom();
+
             input.style.height = "48px";
             input.style.overflowY = "hidden";
+
+            if (shouldStickToBottom) {
+                window.requestAnimationFrame(scrollToBottom);
+            }
         }
 
         /**
