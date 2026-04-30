@@ -33,7 +33,7 @@
 }
 
 .llm-header {
-  background: #0b5ed7;
+  background: #000000;
   color: #fff;
   padding: 10px 12px;
   display: flex;
@@ -97,7 +97,7 @@
 }
 
 .llm-msg-user {
-  background: #d4edda;
+  background: #0EE071;
   margin-left: auto;
 }
 
@@ -177,7 +177,7 @@
 }
 
 .llm-send-icon {
-  background: #0b5ed7;
+  background: #000000;
   border: none;
   border-radius: 14px;
   width: 48px;
