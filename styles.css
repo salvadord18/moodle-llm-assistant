@@ -96,13 +96,41 @@
   box-sizing: border-box;
 }
 
+.llm-msg-body > *:first-child {
+  margin-top: 0;
+}
+
+.llm-msg-body > *:last-child {
+  margin-bottom: 0;
+}
+
+.llm-msg-body p {
+  margin: 0 0 0.6em;
+}
+
+.llm-msg-body ul,
+.llm-msg-body ol {
+  margin: 0.4em 0 0.6em 1.4em;
+  padding-left: 1.2em;
+}
+
+.llm-msg-body li {
+  margin-bottom: 0.35em;
+}
+
+.llm-msg-body li > p {
+  margin: 0;
+}
+
 .llm-msg-user {
   background: #0EE071;
   margin-left: auto;
+  color: #083b22;
+  font-weight: 600;
 }
 
 .llm-sources {
-  margin-top: 8px;
+  margin-top: 5px;
   font-size: 12px;
   opacity: 0.95;
   width: 100%;
@@ -196,7 +224,7 @@
 }
 
 .llm-send-icon:hover {
-  background: #0a53be;
+  background: #0EE071;
 }
 
 .llm-spinner {
