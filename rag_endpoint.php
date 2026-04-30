@@ -141,12 +141,23 @@ function llmassistant_question_keyword(string $question): string {
 }
 
 /**
+ * Base directory where all result folders and summary files are stored.
+ */
+function llmassistant_results_base_dir(): string {
+    global $CFG;
+
+    $base = $CFG->dataroot . '/llmassistant_results';
+    check_dir_exists($base, true, true);
+    return $base;
+}
+
+/**
  * Resolves the folder where to save the files
  */
 function llmassistant_results_dir(int $courseid): string {
     global $CFG, $DB;
 
-    $base = $CFG->dataroot . '/llmassistant_results';
+    $base = llmassistant_results_base_dir();
 
     if ($courseid === 0) {
         $dir = $base . '/global';
@@ -202,6 +213,92 @@ function llmassistant_save_result_snapshot(
     );
 
     return $filepath;
+}
+
+/**
+ * Detects whether the assistant answer is a "no information found" fallback.
+ */
+function llmassistant_is_no_info_answer(string $answer): bool {
+    $a = core_text::strtolower(trim($answer));
+
+    if ($a === '') {
+        return false;
+    }
+
+    return (
+        strpos($a, "não encontrei") !== false ||
+        strpos($a, "nao encontrei") !== false ||
+        strpos($a, "i couldn't find") !== false ||
+        strpos($a, "the provided pdfs do not contain this information") !== false ||
+        strpos($a, "the provided course pdfs do not contain this information") !== false ||
+        strpos($a, "the provided global documents do not contain this information") !== false
+    );
+}
+
+/**
+ * Appends one evaluation row to the summary CSV.
+ */
+function llmassistant_append_result_summary_csv(
+    ?string $savedfile,
+    int $userid,
+    int $courseid,
+    string $question,
+    array $finaloutput
+): ?string {
+    $base = llmassistant_results_base_dir();
+    $csvpath = $base . '/all_results_summary.csv';
+
+    $answer = trim((string)($finaloutput['answer'] ?? ''));
+    $sources = $finaloutput['sources'] ?? [];
+    $debug = $finaloutput['debug'] ?? [];
+
+    $timingphp = (is_array($debug) && !empty($debug['timing_php_ms']) && is_array($debug['timing_php_ms']))
+        ? $debug['timing_php_ms']
+        : [];
+
+    $timingrag = (is_array($debug) && !empty($debug['timing_ms']) && is_array($debug['timing_ms']))
+        ? $debug['timing_ms']
+        : [];
+
+    $row = [
+        'file' => $savedfile ? ltrim(str_replace($base, '', $savedfile), DIRECTORY_SEPARATOR) : '',
+        'saved_at' => date('c'),
+        'courseid' => $courseid,
+        'userid' => $userid,
+        'question' => $question,
+        'answer' => $answer,
+        'sources' => is_array($sources) ? implode(' | ', $sources) : '',
+        'timing_php_total_ms' => $timingphp['total'] ?? '',
+        'timing_rag_total_ms' => $timingrag['total'] ?? '',
+        'timing_generation_ms' => $timingrag['generation'] ?? '',
+        'no_info' => llmassistant_is_no_info_answer($answer) ? 'True' : 'False',
+    ];
+
+    $writeheader = !file_exists($csvpath) || filesize($csvpath) === 0;
+
+    $fh = fopen($csvpath, 'a');
+    if (!$fh) {
+        throw new \RuntimeException('Could not open summary CSV for writing: ' . $csvpath);
+    }
+
+    try {
+        if (!flock($fh, LOCK_EX)) {
+            throw new \RuntimeException('Could not lock summary CSV: ' . $csvpath);
+        }
+
+        if ($writeheader) {
+            fputcsv($fh, array_keys($row));
+        }
+
+        fputcsv($fh, array_values($row));
+
+        fflush($fh);
+        flock($fh, LOCK_UN);
+    } finally {
+        fclose($fh);
+    }
+
+    return $csvpath;
 }
 
 /**
@@ -426,11 +523,20 @@ try {
                 $out
             );
 
+            $csvfile = llmassistant_append_result_summary_csv(
+                $savedfile,
+                $userid,
+                $courseid,
+                $question,
+                $out
+            );
+
             if (!isset($out['debug']) || !is_array($out['debug'])) {
                 $out['debug'] = [];
             }
 
             $out['debug']['saved_result_file'] = $savedfile;
+            $out['debug']['saved_summary_csv'] = $csvfile;
         } catch (Throwable $savee) {
             if (!isset($out['debug']) || !is_array($out['debug'])) {
                 $out['debug'] = [];
