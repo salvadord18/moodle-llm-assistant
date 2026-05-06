@@ -274,6 +274,71 @@ function llmassistant_sources_to_csv_text($sources): string {
 }
 
 /**
+ * Converts debug fields into CSV-friendly columns.
+ */
+function llmassistant_debug_to_csv_fields(array $debug): array {
+    $candidatecounts = (isset($debug['candidate_counts']) && is_array($debug['candidate_counts']))
+        ? $debug['candidate_counts']
+        : [];
+
+    $rejectreasons = '';
+    if (!empty($debug['reject_reasons'])) {
+        if (is_array($debug['reject_reasons'])) {
+            $rejectreasons = implode(' | ', $debug['reject_reasons']);
+        } else {
+            $rejectreasons = (string)$debug['reject_reasons'];
+        }
+    }
+
+    $queries = '';
+    if (!empty($debug['queries'])) {
+        if (is_array($debug['queries'])) {
+            $queries = implode(' || ', $debug['queries']);
+        } else {
+            $queries = (string)$debug['queries'];
+        }
+    }
+
+    $topsources = '';
+    if (!empty($debug['top_sources'])) {
+        if (is_array($debug['top_sources'])) {
+            $topsources = implode(' | ', $debug['top_sources']);
+        } else {
+            $topsources = (string)$debug['top_sources'];
+        }
+    }
+
+    return [
+        'debug_return_stage' => $debug['return_stage'] ?? '',
+        'debug_no_info_reason' => $debug['no_info_reason'] ?? '',
+        'debug_reject_reasons' => $rejectreasons,
+        'debug_collection_name' => $debug['collection_name'] ?? '',
+        'debug_source_courseid' => $debug['source_courseid'] ?? '',
+        'debug_q_for_retrieval' => $debug['q_for_retrieval'] ?? '',
+        'debug_queries' => $queries,
+
+        'debug_want_definition' => !empty($debug['want_definition']) ? 'True' : 'False',
+        'debug_want_policy' => !empty($debug['want_policy']) ? 'True' : 'False',
+        'debug_want_contacts' => !empty($debug['want_contacts']) ? 'True' : 'False',
+        'debug_want_eligibility' => !empty($debug['want_eligibility']) ? 'True' : 'False',
+
+        'debug_candidate_merged_total' => $candidatecounts['merged_total'] ?? '',
+        'debug_candidate_after_regulatory' => $candidatecounts['after_regulatory_filter'] ?? '',
+        'debug_candidate_after_policy' => $candidatecounts['after_policy_filter'] ?? '',
+        'debug_candidate_after_eligibility' => $candidatecounts['after_eligibility_filter'] ?? '',
+        'debug_candidate_after_contact' => $candidatecounts['after_contact_filter'] ?? '',
+
+        'debug_min_dist' => $debug['min_dist'] ?? '',
+        'debug_threshold' => $debug['threshold'] ?? '',
+        'debug_top_score' => $debug['top_score'] ?? '',
+        'debug_top_lex' => $debug['top_lex'] ?? '',
+        'debug_top_policy_quality' => $debug['top_policy_quality'] ?? '',
+
+        'debug_top_sources' => $topsources,
+    ];
+}
+
+/**
  * Rebuilds the summary CSV from all saved JSON result snapshots.
  */
 function llmassistant_rebuild_result_summary_csv(): ?string {
@@ -309,6 +374,7 @@ function llmassistant_rebuild_result_summary_csv(): ?string {
 
         $final = $data['final_response'] ?? [];
         $debug = $final['debug'] ?? [];
+        $debugcsv = llmassistant_debug_to_csv_fields(is_array($debug) ? $debug : []);
 
         $timingphp = (is_array($debug) && !empty($debug['timing_php_ms']) && is_array($debug['timing_php_ms']))
             ? $debug['timing_php_ms']
@@ -321,7 +387,7 @@ function llmassistant_rebuild_result_summary_csv(): ?string {
         $answer = trim((string)($final['answer'] ?? ''));
         $sources = $final['sources'] ?? [];
 
-        $rows[] = [
+        $rows[] = array_merge([
             'file' => ltrim(str_replace($base, '', $filepath), DIRECTORY_SEPARATOR),
             'saved_at' => $data['saved_at'] ?? '',
             'courseid' => $data['courseid'] ?? '',
@@ -333,7 +399,7 @@ function llmassistant_rebuild_result_summary_csv(): ?string {
             'timing_rag_total_ms' => $timingrag['total'] ?? '',
             'timing_generation_ms' => $timingrag['generation'] ?? '',
             'no_info' => llmassistant_is_no_info_answer($answer) ? 'True' : 'False',
-        ];
+        ], $debugcsv);
     }
 
     // Sort by saved_at ascending, then by file path for stability.
@@ -370,6 +436,33 @@ function llmassistant_rebuild_result_summary_csv(): ?string {
             'timing_rag_total_ms',
             'timing_generation_ms',
             'no_info',
+
+            'debug_return_stage',
+            'debug_no_info_reason',
+            'debug_reject_reasons',
+            'debug_collection_name',
+            'debug_source_courseid',
+            'debug_q_for_retrieval',
+            'debug_queries',
+
+            'debug_want_definition',
+            'debug_want_policy',
+            'debug_want_contacts',
+            'debug_want_eligibility',
+
+            'debug_candidate_merged_total',
+            'debug_candidate_after_regulatory',
+            'debug_candidate_after_policy',
+            'debug_candidate_after_eligibility',
+            'debug_candidate_after_contact',
+
+            'debug_min_dist',
+            'debug_threshold',
+            'debug_top_score',
+            'debug_top_lex',
+            'debug_top_policy_quality',
+
+            'debug_top_sources',
         ];
 
         fputcsv($fh, $header);
@@ -403,6 +496,7 @@ function llmassistant_append_result_summary_csv(
     $answer = trim((string)($finaloutput['answer'] ?? ''));
     $sources = $finaloutput['sources'] ?? [];
     $debug = $finaloutput['debug'] ?? [];
+    $debugcsv = llmassistant_debug_to_csv_fields(is_array($debug) ? $debug : []);
 
     $timingphp = (is_array($debug) && !empty($debug['timing_php_ms']) && is_array($debug['timing_php_ms']))
         ? $debug['timing_php_ms']
@@ -412,7 +506,7 @@ function llmassistant_append_result_summary_csv(
         ? $debug['timing_ms']
         : [];
 
-    $row = [
+    $row = array_merge([
         'file' => $savedfile ? ltrim(str_replace($base, '', $savedfile), DIRECTORY_SEPARATOR) : '',
         'saved_at' => date('c'),
         'courseid' => $courseid,
@@ -424,7 +518,7 @@ function llmassistant_append_result_summary_csv(
         'timing_rag_total_ms' => $timingrag['total'] ?? '',
         'timing_generation_ms' => $timingrag['generation'] ?? '',
         'no_info' => llmassistant_is_no_info_answer($answer) ? 'True' : 'False',
-    ];
+    ], $debugcsv);
 
     $fh = fopen($csvpath, 'a+');
     if (!$fh) {

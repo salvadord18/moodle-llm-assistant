@@ -1050,7 +1050,7 @@ def expand_adjacent_regulation_pages(collection, ranked_items, max_extra=4):
 @app.post("/ask")
 def ask(data: Query):
     t0_total = time.perf_counter()
-    
+
     q = (data.question or "").strip()
     user_lang = detect_question_language(q)
 
@@ -1064,11 +1064,24 @@ def ask(data: Query):
 
     is_global_scope = (data.courseid == 0)
     no_info_msg = no_info_text(user_lang, is_global_scope)
-    
+
     want_contacts = is_contacts_question(q_for_retrieval)
     want_policy = is_policy_question(q_for_retrieval)
     want_eligibility = is_eligibility_question(q_for_retrieval)
     want_definition = is_definition_question(q_for_retrieval)
+
+    # Base debug payload (will be enriched throughout the pipeline)
+    debug_info = {
+        "requested_courseid": data.courseid,
+        "question": q,
+        "q_for_retrieval": q_for_retrieval,
+        "user_lang": user_lang,
+        "is_global_scope": is_global_scope,
+        "want_contacts": want_contacts,
+        "want_policy": want_policy,
+        "want_eligibility": want_eligibility,
+        "want_definition": want_definition,
+    }
     
     effective_priority_sources = (
         PRIORITY_SOURCES
@@ -1078,6 +1091,7 @@ def ask(data: Query):
 
     try:
         source_courseid = resolve_global_source_course_id() if is_global_scope else int(data.courseid)
+        debug_info["source_courseid"] = source_courseid
     except Exception as e:
         resp = {"answer": no_info_msg, "sources": []}
         if DEBUG:
@@ -1085,18 +1099,21 @@ def ask(data: Query):
         return resp
 
     collection_name = f"course_docs_{source_courseid}"
+    debug_info["collection_name"] = collection_name
 
     try:
         collection = client.get_collection(collection_name, embedding_function=embedding_fn)
     except Exception as e:
-        resp = {"answer": no_info_msg, "sources": []}
+        resp = {
+            "answer": no_info_msg,
+            "sources": [],
+            "timing_rag_total_ms": round((time.perf_counter() - t0_total) * 1000, 1),
+            "timing_generation_ms": 0.0,
+        }
         if DEBUG:
-            resp["debug"] = {
-                "error": f"Collection not found: {collection_name} ({e})",
-                "requested_courseid": data.courseid,
-                "source_courseid": source_courseid,
-                "is_global_scope": is_global_scope,
-            }
+            debug_info["return_stage"] = "collection_not_found"
+            debug_info["error"] = f"Collection not found: {collection_name} ({e})"
+            resp["debug"] = debug_info
         return resp
 
     queries = [q_for_retrieval]
@@ -1106,10 +1123,14 @@ def ask(data: Query):
         queries.append(q_kw)
 
     q2 = ""
-    if ENABLE_QUERY_REWRITE and not want_definition:
+    if ENABLE_QUERY_REWRITE:
         q2 = ollama_rewrite_query_global(q_for_retrieval) if is_global_scope else ollama_rewrite_query_course(q_for_retrieval)
         if q2 and q2.lower() not in [x.lower() for x in queries]:
             queries.append(q2)
+            
+    debug_info["queries"] = queries
+    debug_info["q_kw"] = q_kw
+    debug_info["q2"] = q2
 
     q_mix = " ".join([x for x in [q_for_retrieval, q_kw, q2] if x]).strip()
 
@@ -1138,7 +1159,7 @@ def ask(data: Query):
     if want_contacts:
         MAX_CHUNKS_LOCAL = 8
     elif want_definition:
-        MAX_CHUNKS_LOCAL = 6
+        MAX_CHUNKS_LOCAL = 8
     else:
         MAX_CHUNKS_LOCAL = MAX_CHUNKS
 
@@ -1207,6 +1228,14 @@ def ask(data: Query):
 
     candidates = list(merged.values())
     
+    debug_candidate_counts = {
+        "merged_total": len(candidates),
+        "after_regulatory_filter": len(candidates),
+        "after_policy_filter": len(candidates),
+        "after_eligibility_filter": len(candidates),
+        "after_contact_filter": len(candidates),
+    }
+    
     if want_policy or is_global_scope:
         regulatory_candidates = [
             c for c in candidates
@@ -1214,6 +1243,8 @@ def ask(data: Query):
         ]
         if regulatory_candidates:
             candidates = regulatory_candidates
+            
+    debug_candidate_counts["after_regulatory_filter"] = len(candidates)
             
     if want_policy or is_global_scope:
         policy_candidates = [
@@ -1223,6 +1254,8 @@ def ask(data: Query):
         if policy_candidates:
             candidates = policy_candidates
             
+    debug_candidate_counts["after_policy_filter"] = len(candidates)
+            
     if want_eligibility:
         eligibility_candidates = [
             c for c in candidates
@@ -1230,6 +1263,8 @@ def ask(data: Query):
         ]
         if eligibility_candidates:
             candidates = eligibility_candidates
+            
+    debug_candidate_counts["after_eligibility_filter"] = len(candidates)
 
     if want_contacts:
         filtered_candidates = [
@@ -1238,16 +1273,28 @@ def ask(data: Query):
         ]
         if filtered_candidates:
             candidates = filtered_candidates
+            
+    debug_candidate_counts["after_contact_filter"] = len(candidates)
+    
+    debug_info["candidate_counts"] = debug_candidate_counts
 
     if not candidates:
-        resp = {"answer": no_info_msg, "sources": []}
+        resp = {
+            "answer": no_info_msg,
+            "sources": [],
+            "timing_rag_total_ms": round((time.perf_counter() - t0_total) * 1000, 1),
+            "timing_generation_ms": 0.0,
+        }
         if DEBUG:
             resp["debug"] = {
                 "return_stage": "no_candidates",
+                "no_info_reason": "all_candidates_filtered_out",
                 "requested_courseid": data.courseid,
                 "source_courseid": source_courseid,
                 "collection_name": collection_name,
-                "queries": queries
+                "queries": queries,
+                "candidate_counts": debug_candidate_counts,
+                "top_sources": sorted(seen_sources)[:10],
             }
         return resp
 
@@ -1265,7 +1312,7 @@ def ask(data: Query):
         reject = True
 
     # Additional safety for definition questions: require at least some lexical support.
-    if want_definition and top_lex < 0.12:
+    if want_definition and top_lex < 0.12 and best_dist > 0.75:
         reject = True
 
     # Additional safety for global/policy mode: require some policy-quality evidence.
@@ -1273,25 +1320,41 @@ def ask(data: Query):
         reject = True
 
     # Additional safety for weak top candidates.
-    if top_score < 0.18:
+    min_top_score = 0.14 if want_definition and not is_global_scope else 0.18
+    if top_score < min_top_score:
         reject = True
+        
+    reject_reasons = []
+
+    if best_dist > threshold:
+        reject_reasons.append("best_dist_above_threshold")
+
+    if want_definition and top_lex < 0.12 and best_dist > 0.75:
+        reject_reasons.append("definition_low_lexical_support")
+
+    if (want_policy or is_global_scope) and top_policy_quality <= 0:
+        reject_reasons.append("no_policy_quality_signal")
+
+    if top_score < min_top_score:
+        reject_reasons.append("top_score_too_low")
 
     if reject:
-        candidates = candidates[:10]
-        resp = {"answer": no_info_msg, "sources": []}
+        resp = {
+            "answer": no_info_msg,
+            "sources": [],
+            "timing_rag_total_ms": round((time.perf_counter() - t0_total) * 1000, 1),
+            "timing_generation_ms": 0.0,
+        }
         if DEBUG:
-            resp["debug"] = {
-                "requested_courseid": data.courseid,
-                "source_courseid": source_courseid,
-                "collection_name": collection_name,
-                "min_dist": best_dist,
-                "threshold": threshold,
-                "top_score": top_score,
-                "top_lex": top_lex,
-                "top_policy_quality": top_policy_quality,
-                "queries": queries,
-                "top_sources": sorted(seen_sources)[:10]
-            }
+            debug_info["return_stage"] = "reject"
+            debug_info["reject_reasons"] = reject_reasons
+            debug_info["min_dist"] = best_dist
+            debug_info["threshold"] = threshold
+            debug_info["top_score"] = top_score
+            debug_info["top_lex"] = top_lex
+            debug_info["top_policy_quality"] = top_policy_quality
+            debug_info["top_sources"] = sorted(seen_sources)[:10]
+            resp["debug"] = debug_info
         return resp
 
     # -----------------------------
