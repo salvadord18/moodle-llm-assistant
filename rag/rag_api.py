@@ -707,17 +707,17 @@ def is_contacts_question(q: str) -> bool:
 def is_policy_question(q: str) -> bool:
     ql = (q or "").lower()
     return any(k in ql for k in [
-        # English
-        "grading policy", "grade", "assessment", "exam", "criteria", "rules",
-        "regulation", "regulations", "procedure", "procedures", "deadline", "deadlines",
-        "special exam", "special exams", "enrollment", "registration", "eligibility",
+        # English – keep only clearly regulatory/admin cues
+        "regulation", "regulations", "statute", "eligibility",
+        "registration deadline", "special exam", "special exams",
+        "academic services", "creditation", "fee", "fees",
+        "deadline for", "who may access", "who can access",
 
-        # Portuguese
-        "regulamento", "regulamentos", "norma", "normas", "regra", "regras",
-        "procedimento", "procedimentos", "prazo", "prazos",
-        "época especial", "epoca especial", "exame", "exames",
-        "inscrever", "inscrição", "inscricao", "acesso", "elegível", "elegivel",
-        "quem se pode", "quem pode", "estatuto especial", "serviços académicos", "servicos academicos"
+        # Portuguese – keep only clearly regulatory/admin cues
+        "regulamento", "regulamentos", "estatuto", "elegível", "elegivel",
+        "época especial", "epoca especial", "serviços académicos", "servicos academicos",
+        "creditação", "creditacao", "emolumentos", "propina",
+        "prazo para", "quem pode aceder", "quem tem acesso"
     ])
     
 def is_definition_question(q: str) -> bool:
@@ -928,12 +928,16 @@ def build_retrieval_query(question: str, history: list[dict]) -> str:
         return q
 
     q_tokens = tokenize(q)
-    has_explicit_topic = bool(TOPIC_RE.search(q))
-    is_short_ambiguous = len(q_tokens) <= 6 and not has_explicit_topic
     is_followup = bool(FOLLOWUP_RE.search(q))
     is_entity_followup = bool(ENTITY_FOLLOWUP_RE.search(q))
+    is_definition = is_definition_question(q)
 
-    if not (is_followup or is_short_ambiguous or is_entity_followup):
+    # Do not contaminate standalone conceptual/definition questions with previous turns.
+    if is_definition:
+        return q
+
+    # Only expand retrieval query when there is a strong follow-up signal.
+    if not (is_followup or is_entity_followup):
         return q
 
     previous_user_messages = [
@@ -1066,7 +1070,7 @@ def ask(data: Query):
     no_info_msg = no_info_text(user_lang, is_global_scope)
 
     want_contacts = is_contacts_question(q_for_retrieval)
-    want_policy = is_policy_question(q_for_retrieval)
+    want_policy = is_global_scope and is_policy_question(q_for_retrieval)
     want_eligibility = is_eligibility_question(q_for_retrieval)
     want_definition = is_definition_question(q_for_retrieval)
 
@@ -1194,7 +1198,7 @@ def ask(data: Query):
                 score -= 0.10
 
             # Policy/global-specific scoring
-            if want_policy or is_global_scope:
+            if is_global_scope:
                 score += policy_chunk_quality(doc, meta, q_for_retrieval, is_global_scope=is_global_scope)
 
             # Contact-specific scoring
@@ -1236,7 +1240,7 @@ def ask(data: Query):
         "after_contact_filter": len(candidates),
     }
     
-    if want_policy or is_global_scope:
+    if is_global_scope:
         regulatory_candidates = [
             c for c in candidates
             if is_regulatory_source((c[1] or {}).get("source", ""))
@@ -1246,7 +1250,7 @@ def ask(data: Query):
             
     debug_candidate_counts["after_regulatory_filter"] = len(candidates)
             
-    if want_policy or is_global_scope:
+    if is_global_scope:
         policy_candidates = [
             c for c in candidates
             if policy_chunk_quality(c[0], c[1], q_for_retrieval, is_global_scope=is_global_scope) > 0
@@ -1304,7 +1308,12 @@ def ask(data: Query):
     top_lex = lexical_overlap_score(q_mix, top_doc)
     top_policy_quality = policy_chunk_quality(top_doc, top_meta, q_for_retrieval, is_global_scope=is_global_scope) if (want_policy or is_global_scope) else 0.0
 
-    threshold = CONTACT_DISTANCE_THRESHOLD if want_contacts else GENERIC_DISTANCE_THRESHOLD
+    if want_contacts:
+        threshold = CONTACT_DISTANCE_THRESHOLD
+    elif want_definition and not is_global_scope:
+        threshold = 1.05
+    else:
+        threshold = GENERIC_DISTANCE_THRESHOLD
 
     reject = False
 
@@ -1316,7 +1325,7 @@ def ask(data: Query):
         reject = True
 
     # Additional safety for global/policy mode: require some policy-quality evidence.
-    if (want_policy or is_global_scope) and top_policy_quality <= 0:
+    if is_global_scope and top_policy_quality <= 0:
         reject = True
 
     # Additional safety for weak top candidates.
