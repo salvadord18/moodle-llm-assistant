@@ -558,6 +558,62 @@ def format_sources(source_map):
 
 USED_SOURCES_RE = re.compile(r"(?im)^USED[\s_-]?SOURCES:\s*(.+?)\s*$")
 
+INLINE_SOURCE_ID_RE = re.compile(r"\[SOURCE_ID:\s*(S\d+)\|[^\]]+\]", re.IGNORECASE)
+INLINE_SOURCE_TAG_RE = re.compile(r"\[SOURCE_ID:\s*S\d+\|[^\]]+\]", re.IGNORECASE)
+
+SOURCE_ATTRIBUTION_LINE_RE = re.compile(
+    r"(?im)^\s*(?:"
+    r"this information(?: is| was)?(?: explicitly)? stated in|"
+    r"according to|"
+    r"supported by|"
+    r"based on|"
+    r"as shown in|"
+    r"isto está indicado em|"
+    r"esta informação(?: está| foi)?(?: explicitamente)? indicada em|"
+    r"de acordo com|"
+    r"suportado por|"
+    r"com base em"
+    r").*\[SOURCE_ID:[^\]]+\].*$"
+)
+
+def extract_inline_source_ids(answer: str, source_map: list[dict]):
+    """
+    Extract inline SOURCE_ID references from the answer body, e.g.:
+    [SOURCE_ID: S2|Lecture1.pdf|p4|c-1]
+    """
+    valid_ids = {item["id"] for item in source_map}
+    ids = [sid.upper() for sid in INLINE_SOURCE_ID_RE.findall(answer or "")]
+    ids = [sid for sid in ids if sid in valid_ids]
+    return list(dict.fromkeys(ids))
+
+def sanitize_answer_text(answer: str) -> str:
+    """
+    Remove inline SOURCE_ID tags and attribution lines from the main answer body.
+    """
+    text = (answer or "").strip()
+
+    # Remove full attribution lines such as:
+    # "This information is explicitly stated in [SOURCE_ID: ...]"
+    text = SOURCE_ATTRIBUTION_LINE_RE.sub("", text)
+
+    # Remove any remaining inline SOURCE_ID tags
+    text = INLINE_SOURCE_TAG_RE.sub("", text)
+
+    # Clean leftover spaces before punctuation
+    text = re.sub(r"\s+([,.;:!?])", r"\\1", text)
+
+    # Clean empty brackets / duplicate whitespace
+    text = re.sub(r"\(\s*\)", "", text)
+    text = re.sub(r"[ \t]+", " ", text)
+    text = re.sub(r" *\n *", "\n", text)
+    text = re.sub(r"\n{3,}", "\n\n", text)
+
+    # Remove awkward trailing phrases left after tag stripping
+    text = re.sub(r"(?im)(this information is explicitly stated in|according to|supported by|based on)\s*\.?", "", text)
+    text = re.sub(r"(?im)(esta informação está explicitamente indicada em|de acordo com|suportado por|com base em)\s*\.?", "", text)
+
+    return text.strip()
+
 def extract_used_source_ids(answer: str, source_map: list[dict]):
     """
     Extrai a linha final:
@@ -1527,7 +1583,9 @@ Instructions:
 - If multiple relevant items exist, include all of them.
 - Prefer completeness and usefulness over unnecessary brevity.
 - Do not invent facts that are not supported by the CONTEXT.
-- Do not mention SOURCE_IDs inside the main body of the answer.
+- Never include [SOURCE_ID: ...] tags in the main body of the answer.
+- The only place where SOURCE_IDs may appear is the final USED_SOURCES line.
+- Do not write sentences such as "According to [SOURCE_ID: ...]" or "This information is stated in [SOURCE_ID: ...]".
 - If the user is asking for additional or other people/items, do not simply repeat previously mentioned items unless needed for clarity.
 - In that case, look for additional supported items not already mentioned in the chat.
 - If no additional supported items exist in the CONTEXT, say so clearly.
@@ -1565,6 +1623,19 @@ ANSWER:
         return {"answer": localized_error_text("empty_response", user_lang), "sources": []}
 
     used_source_ids, clean_answer = extract_used_source_ids(answer, used_sources)
+
+    # If the model put SOURCE_IDs inline in the body instead of only in USED_SOURCES,
+    # recover them before sanitizing the answer text.
+    inline_source_ids = extract_inline_source_ids(clean_answer, used_sources)
+
+    # Clean answer body so no [SOURCE_ID: ...] appears to the user
+    clean_answer = sanitize_answer_text(clean_answer)
+
+    # If the model forgot the final USED_SOURCES line but cited inline SOURCE_IDs,
+    # reuse those IDs for the source section.
+    if not used_source_ids and inline_source_ids:
+        used_source_ids = inline_source_ids
+
     used_sources_from_model = bool(used_source_ids)
 
     if used_source_ids:
