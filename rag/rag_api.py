@@ -564,53 +564,55 @@ INLINE_SOURCE_TAG_RE = re.compile(r"\[SOURCE_ID:\s*S\d+\|[^\]]+\]", re.IGNORECAS
 SOURCE_ATTRIBUTION_LINE_RE = re.compile(
     r"(?im)^\s*(?:"
     r"this information(?: is| was)?(?: explicitly)? stated in|"
+    r"this definition(?: can be| is)? found in|"
     r"according to|"
     r"supported by|"
     r"based on|"
     r"as shown in|"
+    r"both (?:of )?these statements support|"
+    r"similarly,? in|"
     r"isto está indicado em|"
     r"esta informação(?: está| foi)?(?: explicitamente)? indicada em|"
+    r"esta definição(?: encontra-se| está)? em|"
     r"de acordo com|"
     r"suportado por|"
     r"com base em"
-    r").*\[SOURCE_ID:[^\]]+\].*$"
+    r").*$"
 )
 
+TRAILING_SOURCES_BLOCK_RE = re.compile(
+    r"(?is)\n\s*Sources:\s*.*$"
+)
+
+BACKREF_ARTIFACT_RE = re.compile(r"\\\d+")
+
 def extract_inline_source_ids(answer: str, source_map: list[dict]):
-    """
-    Extract inline SOURCE_ID references from the answer body, e.g.:
-    [SOURCE_ID: S2|Lecture1.pdf|p4|c-1]
-    """
-    valid_ids = {item["id"] for item in source_map}
+    valid_ids = {item['id'] for item in source_map}
     ids = [sid.upper() for sid in INLINE_SOURCE_ID_RE.findall(answer or "")]
     ids = [sid for sid in ids if sid in valid_ids]
     return list(dict.fromkeys(ids))
 
 def sanitize_answer_text(answer: str) -> str:
-    """
-    Remove inline SOURCE_ID tags and attribution lines from the main answer body.
-    """
     text = (answer or "").strip()
 
-    # Remove full attribution lines such as:
-    # "This information is explicitly stated in [SOURCE_ID: ...]"
+    # Remove explicit attribution/meta lines
     text = SOURCE_ATTRIBUTION_LINE_RE.sub("", text)
 
-    # Remove any remaining inline SOURCE_ID tags
+    # Remove trailing 'Sources:' blocks invented by the model
+    text = TRAILING_SOURCES_BLOCK_RE.sub("", text)
+
+    # Remove inline SOURCE_ID tags if any remain
     text = INLINE_SOURCE_TAG_RE.sub("", text)
 
-    # Clean leftover spaces before punctuation
-    text = re.sub(r"\s+([,.;:!?])", r"\\1", text)
+    # Remove weird backreference artefacts like \1, \2
+    text = BACKREF_ARTIFACT_RE.sub("", text)
 
-    # Clean empty brackets / duplicate whitespace
+    # Remove leftover empty bullets/paragraphs and normalize spacing
     text = re.sub(r"\(\s*\)", "", text)
     text = re.sub(r"[ \t]+", " ", text)
     text = re.sub(r" *\n *", "\n", text)
     text = re.sub(r"\n{3,}", "\n\n", text)
-
-    # Remove awkward trailing phrases left after tag stripping
-    text = re.sub(r"(?im)(this information is explicitly stated in|according to|supported by|based on)\s*\.?", "", text)
-    text = re.sub(r"(?im)(esta informação está explicitamente indicada em|de acordo com|suportado por|com base em)\s*\.?", "", text)
+    text = re.sub(r"\s+([,.;:!?])", r"\\1", text)
 
     return text.strip()
 
@@ -716,6 +718,52 @@ def localized_error_text(kind: str, lang: str) -> str:
         lang,
         "Ocorreu um erro." if lang == "pt" else "An error occurred."
     )
+    
+def _match_case(replacement: str, original: str) -> str:
+    if original.isupper():
+        return replacement.upper()
+    if original[:1].isupper():
+        return replacement[:1].upper() + replacement[1:]
+    return replacement
+
+def normalize_pt_variant(text: str, lang: str) -> str:
+    """
+    Light post-processing to convert common Brazilian Portuguese forms
+    into European Portuguese when the answer language is Portuguese.
+    """
+    if lang != "pt":
+        return text or ""
+
+    t = (text or "").strip()
+
+    replacements = [
+        (r"\bpor meio de\b", "através de"),
+        (r"\baplicativo\b", "aplicação"),
+        (r"\baplicativos\b", "aplicações"),
+        (r"\busuário\b", "utilizador"),
+        (r"\busuários\b", "utilizadores"),
+        (r"\barquivo\b", "ficheiro"),
+        (r"\barquivos\b", "ficheiros"),
+        (r"\btela\b", "ecrã"),
+        (r"\btelas\b", "ecrãs"),
+        (r"\btime\b", "equipa"),
+        (r"\btimes\b", "equipas"),
+        (r"\bcelular\b", "telemóvel"),
+        (r"\bcelulares\b", "telemóveis"),
+        (r"\bônibus\b", "autocarro"),
+        (r"\btrem\b", "comboio"),
+        (r"\btrens\b", "comboios"),
+    ]
+
+    for pattern, repl in replacements:
+        t = re.sub(
+            pattern,
+            lambda m: _match_case(repl, m.group(0)),
+            t,
+            flags=re.IGNORECASE
+        )
+
+    return t
 
 def simple_source_ranking(answer: str, query: str, source_map: list[dict]):
     """
@@ -1567,9 +1615,28 @@ def ask(data: Query):
         already_mentioned_block = "ALREADY_MENTIONED_IN_CHAT:\n" + "\n".join(
             f"- {name}" for name in sorted(known_names)
         ) + "\n\n"
+        
+    locale_block = ""
+    if user_lang == "pt":
+        locale_block = """
+            Portuguese variant rules:
+            - Write strictly in European Portuguese (Português de Portugal).
+            - Do not use Brazilian Portuguese spelling, grammar, or vocabulary.
+            - Prefer European Portuguese wording such as:
+            - "através de" instead of "por meio de"
+            - "aplicação" instead of "aplicativo"
+            - "utilizador" instead of "usuário"
+            - "ficheiro" instead of "arquivo"
+            - "equipa" instead of "time"
+            - "telemóvel" instead of "celular"
+            - "ecrã" instead of "tela"
+            - Use natural academic Portuguese from Portugal.
+            """
 
     prompt = f"""{system_prompt}
 
+
+{locale_block}
 {already_mentioned_block}{history_block}CONTEXT:
 {context}
 
@@ -1578,19 +1645,23 @@ QUESTION:
 
 Instructions:
 - Answer using only information supported by the CONTEXT.
+- Answer the user's question directly.
 - If the answer is explicitly present, extract it directly or paraphrase it faithfully.
 - If relevant information is spread across multiple parts of the CONTEXT, combine the supported information into one coherent answer.
 - If multiple relevant items exist, include all of them.
 - Prefer completeness and usefulness over unnecessary brevity.
 - Do not invent facts that are not supported by the CONTEXT.
-- Never include [SOURCE_ID: ...] tags in the main body of the answer.
+- Do not talk about the CONTEXT, the evidence selection process, or how the answer was derived.
+- Do not say things like "According to the context", "This is stated in the context", "Both statements support this", or similar meta-commentary.
+- Do not include a "Sources:" section in the main body of the answer.
+- Do not include citations, page numbers, SOURCE_ID tags, or file names in the main body of the answer.
 - The only place where SOURCE_IDs may appear is the final USED_SOURCES line.
-- Do not write sentences such as "According to [SOURCE_ID: ...]" or "This information is stated in [SOURCE_ID: ...]".
 - If the user is asking for additional or other people/items, do not simply repeat previously mentioned items unless needed for clarity.
 - In that case, look for additional supported items not already mentioned in the chat.
 - If no additional supported items exist in the CONTEXT, say so clearly.
+- For short factual or definitional questions, answer in 1-3 sentences unless the question explicitly asks for more detail.
 - Answer in the same language as the user's QUESTION.
-- If the QUESTION is in Portuguese, answer in Portuguese.
+- If the QUESTION is in Portuguese, answer strictly in European Portuguese (Português de Portugal), never in Brazilian Portuguese.
 - If the QUESTION is in English, answer in English.
 
 Source handling:
@@ -1624,15 +1695,16 @@ ANSWER:
 
     used_source_ids, clean_answer = extract_used_source_ids(answer, used_sources)
 
-    # If the model put SOURCE_IDs inline in the body instead of only in USED_SOURCES,
-    # recover them before sanitizing the answer text.
+    # Recover inline IDs if the model cited them in the body instead of only in USED_SOURCES
     inline_source_ids = extract_inline_source_ids(clean_answer, used_sources)
 
-    # Clean answer body so no [SOURCE_ID: ...] appears to the user
+    # Sanitize the visible answer text
     clean_answer = sanitize_answer_text(clean_answer)
 
-    # If the model forgot the final USED_SOURCES line but cited inline SOURCE_IDs,
-    # reuse those IDs for the source section.
+    # Normalize Portuguese variant to European Portuguese
+    clean_answer = normalize_pt_variant(clean_answer, user_lang)
+
+    # If the model forgot USED_SOURCES but cited inline IDs, reuse them
     if not used_source_ids and inline_source_ids:
         used_source_ids = inline_source_ids
 
