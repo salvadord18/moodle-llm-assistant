@@ -915,28 +915,19 @@ def expand_same_page_siblings(collection, ranked_items, max_extra=8):
     return expanded
 
 def build_retrieval_query(question: str, history: list[dict]) -> str:
-    """
-    Make retrieval history-aware only for genuinely ambiguous follow-up questions.
-    Handles cases like:
-    - "Isn't there any other teacher?"
-    - "And their emails?"
-    - "Who is Yuri?"
-    But does NOT rewrite complete standalone questions.
-    """
     q = (question or "").strip()
     if not q or not history:
         return q
 
-    q_tokens = tokenize(q)
     is_followup = bool(FOLLOWUP_RE.search(q))
     is_entity_followup = bool(ENTITY_FOLLOWUP_RE.search(q))
     is_definition = is_definition_question(q)
 
-    # Do not contaminate standalone conceptual/definition questions with previous turns.
+    # Never contaminate standalone definition/concept questions.
     if is_definition:
         return q
 
-    # Only expand retrieval query when there is a strong follow-up signal.
+    # Only expand genuinely explicit follow-ups.
     if not (is_followup or is_entity_followup):
         return q
 
@@ -1071,7 +1062,7 @@ def ask(data: Query):
 
     want_contacts = is_contacts_question(q_for_retrieval)
     want_policy = is_global_scope and is_policy_question(q_for_retrieval)
-    want_eligibility = is_eligibility_question(q_for_retrieval)
+    want_eligibility = is_global_scope and is_eligibility_question(q_for_retrieval)
     want_definition = is_definition_question(q_for_retrieval)
 
     # Base debug payload (will be enriched throughout the pipeline)
@@ -1089,7 +1080,7 @@ def ask(data: Query):
     
     effective_priority_sources = (
         PRIORITY_SOURCES
-        if (not is_global_scope and (want_contacts or want_policy) and not want_definition)
+        if (not is_global_scope and want_contacts and not want_definition)
         else []
     )
 
@@ -1190,10 +1181,6 @@ def ask(data: Query):
             page = safe_int((meta or {}).get("page"))
             section_type = ((meta or {}).get("section_type") or "").lower()
 
-            # General metadata-based boosts
-            if want_policy and section_type in ("assessment", "schedule"):
-                score += 0.20
-
             if section_type == "example":
                 score -= 0.10
 
@@ -1213,10 +1200,7 @@ def ask(data: Query):
 
             # Canonical priority-source boosts
             if effective_priority_sources and is_priority_source(src, effective_priority_sources):
-                if want_policy:
-                    score += 0.15
-                else:
-                    score += SOURCE_BONUS
+                score += SOURCE_BONUS
 
             k = doc_key(doc, meta)
             cur = merged.get(k)
@@ -1347,7 +1331,13 @@ def ask(data: Query):
     if top_score < min_top_score:
         reject_reasons.append("top_score_too_low")
 
-    if reject:
+    hard_reject = False
+
+    # Keep strict rejection only for the global scope.
+    if is_global_scope:
+        hard_reject = reject
+
+    if hard_reject:
         resp = {
             "answer": no_info_msg,
             "sources": [],
@@ -1468,7 +1458,7 @@ def ask(data: Query):
     if want_contacts:
         top = expand_same_page_siblings(collection, top, max_extra=6)
         
-    if want_policy or want_eligibility or is_global_scope:
+    if is_global_scope:
         top = expand_adjacent_regulation_pages(collection, top, max_extra=4)
         top.sort(key=lambda x: (-x[3], x[2]))
 
@@ -1580,8 +1570,8 @@ ANSWER:
     if used_source_ids:
         selected_items = [item for item in used_sources if item["id"] in used_source_ids]
 
-        # In global/policy mode, prefer regulatory sources even when model returned IDs.
-        if want_policy or is_global_scope:
+        # In global mode, prefer regulatory sources even when model returned IDs.
+        if is_global_scope:
             regulatory_selected = [
                 item for item in selected_items
                 if is_regulatory_source(item.get("source", ""))
@@ -1596,8 +1586,8 @@ ANSWER:
             fallback_scored = simple_source_ranking(clean_answer, q, used_sources)
             fallback_items = [item for item, _score in fallback_scored]
 
-            # In policy/global mode, keep only normative chunks that match policy semantics
-            if want_policy or is_global_scope:
+            # In global mode, keep only normative chunks that match policy semantics
+            if is_global_scope:
                 filtered_items = [
                     item for item in fallback_items
                     if policy_chunk_quality(item.get("content", ""), item, q_for_retrieval, is_global_scope=is_global_scope) > 0
