@@ -1,4 +1,4 @@
-/* global DOMPurify, marked */
+/* global DOMPurify, marked, renderMathInElement */
 
 define(['core/log'], function(Log) {
     /**
@@ -96,6 +96,33 @@ define(['core/log'], function(Log) {
         }
 
         /**
+         * Render math formulas inside an element using KaTeX auto-render.
+         *
+         * Requires renderMathInElement to be available globally.
+         *
+         * @param {HTMLElement} el Element containing assistant HTML.
+         */
+        function renderMath(el) {
+            if (!el || typeof renderMathInElement !== "function") {
+                return;
+            }
+
+            try {
+                renderMathInElement(el, {
+                    delimiters: [
+                        {left: "$$", right: "$$", display: true},
+                        {left: "\\[", right: "\\]", display: true},
+                        {left: "\\(", right: "\\)", display: false}
+                    ],
+                    throwOnError: false,
+                    ignoredTags: ["script", "noscript", "style", "textarea", "pre", "code"]
+                });
+            } catch (e) {
+                Log.debug("Math rendering failed.");
+            }
+        }
+
+        /**
          * Build the link of the source.
          *
          * @param {string} label Source visible label.
@@ -131,6 +158,10 @@ define(['core/log'], function(Log) {
             const text = document.createElement("div");
             text.className = "llm-msg-body";
             text.innerHTML = DOMPurify.sanitize(marked.parse(answer));
+
+            // Render math formulas (KaTeX) after Markdown + sanitization.
+            renderMath(text);
+
             wrap.appendChild(text);
 
             if (Array.isArray(sources) && sources.length) {

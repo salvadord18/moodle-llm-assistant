@@ -83,6 +83,11 @@ MIN_PRIORITY_CHUNKS = 2  # safety floor
 EXAMPLE_PENALTY_EMAIL = float(os.getenv("LLMASSISTANT_EXAMPLE_EMAIL_PENALTY", "0.30"))
 EXAMPLE_PENALTY_TABLE = float(os.getenv("LLMASSISTANT_EXERCISE_TABLE_PENALTY", "0.20"))
 
+MATH_FORMAT = os.getenv("LLMASSISTANT_MATH_FORMAT", "latex").strip().lower()
+# allowed values:
+# - "plain"  -> Accuracy = (TP + TN) / (P + N)
+# - "latex"  -> $$Accuracy = \frac{TP + TN}{P + N}$$
+
 STOPWORDS = {
     "the","a","an","and","or","of","to","in","on","for","with","is","are","was","were",
     "this","that","these","those","who","what","when","where","why","how",
@@ -612,9 +617,109 @@ def sanitize_answer_text(answer: str) -> str:
     text = re.sub(r"[ \t]+", " ", text)
     text = re.sub(r" *\n *", "\n", text)
     text = re.sub(r"\n{3,}", "\n\n", text)
-    text = re.sub(r"\s+([,.;:!?])", r"\\1", text)
+    text = re.sub(r"\s+([,.;:!?])", r"\1", text)
 
     return text.strip()
+
+def normalize_formula_text(text: str, mode: str = "plain") -> str:
+    """
+    Convert common LaTeX-like or plain-math fragments into either:
+    - plain text formulas, or
+    - proper $$...$$ math blocks for frontend rendering.
+    """
+
+    t = (text or "").strip()
+
+    # 1) Remove \text{...} wrappers but preserve content
+    t = re.sub(r"\\text\{([^{}]+)\}", r"\1", t)
+
+    # 2) Convert \[ ... \] to marker
+    t = re.sub(r"\\\[\s*(.+?)\s*\\\]", r"@@MATH@@\1@@ENDMATH@@", t, flags=re.DOTALL)
+
+    # 3) Convert [ ... ] on its own line to marker
+    t = re.sub(r"(?m)^\[\s*(.+?)\s*\]$", r"@@MATH@@\1@@ENDMATH@@", t)
+
+    # 4) Convert \frac{A}{B}
+    frac_re = re.compile(r"\\frac\{([^{}]+)\}\{([^{}]+)\}")
+    while frac_re.search(t):
+        if mode == "plain":
+            t = frac_re.sub(r"(\1) / (\2)", t)
+        else:
+            t = frac_re.sub(r"\\frac{\1}{\2}", t)
+
+    # 5) If latex mode, convert plain formulas into $$...$$
+    if mode == "latex":
+        # Example: Specificity = TN / (TN + FP)
+        def convert_formula_line(match):
+            lhs = match.group(1).strip()
+            num = match.group(2).strip()
+            den = match.group(3).strip()
+            return f"$$" + lhs + r" = \frac{" + num + "}{" + den + "}" + "$$"
+
+        t = re.sub(
+            r"(?m)^([A-Za-z][A-Za-z0-9 _()-]{1,60})\s*=\s*([A-Za-z0-9_+\- ]+?)\s*/\s*\(([^()\n]+)\)\s*$",
+            convert_formula_line,
+            t
+        )
+
+    # 6) Plain mode strips math delimiters
+    if mode == "plain":
+        t = re.sub(r"\$\$(.+?)\$\$", r"\1", t, flags=re.DOTALL)
+        t = re.sub(r"\$(.+?)\$", r"\1", t, flags=re.DOTALL)
+        t = re.sub(r"@@MATH@@\s*(.+?)\s*@@ENDMATH@@", r"\1", t, flags=re.DOTALL)
+    else:
+        # Latex mode converts math markers to display math
+        t = re.sub(r"@@MATH@@\s*(.+?)\s*@@ENDMATH@@", r"$$\1$$", t, flags=re.DOTALL)
+
+    # 7) Clean extra spacing
+    t = re.sub(r"[ \t]+", " ", t)
+    t = re.sub(r" *\n *", "\n", t)
+    t = re.sub(r"\n{3,}", "\n\n", t)
+
+    return t.strip()
+    """
+    Convert common LaTeX-like or pseudo-math fragments into either:
+    - plain text formulas, or
+    - proper $$...$$ math blocks for frontend rendering.
+    """
+
+    t = (text or "").strip()
+
+    # 1) Remove \text{...} wrappers but preserve content
+    t = re.sub(r"\\text\{([^{}]+)\}", r"\1", t)
+
+    # 2) Convert \[ ... \] or [ ... ] pseudo display math to something cleaner
+    # Case A: \[ ... \]
+    t = re.sub(r"\\\[\s*(.+?)\s*\\\]", r"@@MATH@@\1@@ENDMATH@@", t, flags=re.DOTALL)
+
+    # Case B: [ ... ] on its own line
+    t = re.sub(r"(?m)^\[\s*(.+?)\s*\]$", r"@@MATH@@\1@@ENDMATH@@", t)
+
+    # 3) Convert \frac{A}{B}
+    frac_re = re.compile(r"\\frac\{([^{}]+)\}\{([^{}]+)\}")
+    while frac_re.search(t):
+        if mode == "plain":
+            t = frac_re.sub(r"(\1) / (\2)", t)
+        else:
+            t = frac_re.sub(r"\\frac{\1}{\2}", t)
+
+    # 4) Convert existing $...$ / $$...$$ if mode is plain
+    if mode == "plain":
+        t = re.sub(r"\$\$(.+?)\$\$", r"\1", t, flags=re.DOTALL)
+        t = re.sub(r"\$(.+?)\$", r"\1", t, flags=re.DOTALL)
+
+    # 5) Final format for extracted math blocks
+    if mode == "plain":
+        t = re.sub(r"@@MATH@@\s*(.+?)\s*@@ENDMATH@@", r"\1", t, flags=re.DOTALL)
+    else:
+        t = re.sub(r"@@MATH@@\s*(.+?)\s*@@ENDMATH@@", r"$$\1$$", t, flags=re.DOTALL)
+
+    # 6) Simplify obvious repeated whitespace
+    t = re.sub(r"[ \t]+", " ", t)
+    t = re.sub(r" *\n *", "\n", t)
+    t = re.sub(r"\n{3,}", "\n\n", t)
+
+    return t.strip()
 
 def extract_used_source_ids(answer: str, source_map: list[dict]):
     """
@@ -1457,6 +1562,7 @@ def ask(data: Query):
             debug_info["top_lex"] = top_lex
             debug_info["top_policy_quality"] = top_policy_quality
             debug_info["top_sources"] = sorted(seen_sources)[:10]
+            debug_info["math_format"] = MATH_FORMAT
             resp["debug"] = debug_info
         return resp
 
@@ -1632,11 +1738,39 @@ def ask(data: Query):
             - "ecrã" instead of "tela"
             - Use natural academic Portuguese from Portugal.
             """
+            
+    formula_block = ""
+    if MATH_FORMAT == "latex":
+        formula_block = """
+    Math formatting rules:
+    - If you include a formula, ALWAYS write it using LaTeX math delimiters.
+    - Use display math as $$...$$ for standalone formulas.
+    - Prefer fractions written with \\frac{...}{...}, not plain slash notation.
+    - Example:
+    $$Accuracy = \\frac{TP + TN}{P + N}$$
+    - Do not write formulas as plain text such as:
+    Accuracy = (TP + TN) / (P + N)
+    - Do not use square-bracket pseudo-math such as [ \\text{...} ].
+    - Keep formulas short and compatible with KaTeX/MathJax rendering.
+    """.strip()
+    else:
+        formula_block = """
+    Math formatting rules:
+    - Do not use LaTeX notation or mathematical markup such as \\frac, \\text, \\sum, [ ... ], or $$ ... $$.
+    - When giving formulas, write them in plain text using simple notation.
+    - Examples:
+    - Accuracy = (TP + TN) / (P + N)
+    - Precision = TP / (TP + FP)
+    - Recall = TP / P
+    - Keep formulas readable in plain chat text.
+    """.strip()
 
     prompt = f"""{system_prompt}
 
 
+
 {locale_block}
+{formula_block}
 {already_mentioned_block}{history_block}CONTEXT:
 {context}
 
@@ -1700,6 +1834,9 @@ ANSWER:
 
     # Sanitize the visible answer text
     clean_answer = sanitize_answer_text(clean_answer)
+
+    # Normalize formulas
+    clean_answer = normalize_formula_text(clean_answer, mode=MATH_FORMAT)
 
     # Normalize Portuguese variant to European Portuguese
     clean_answer = normalize_pt_variant(clean_answer, user_lang)
