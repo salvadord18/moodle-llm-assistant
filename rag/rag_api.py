@@ -951,6 +951,68 @@ def simple_source_ranking(answer: str, query: str, source_map: list[dict]):
     scored.sort(key=lambda x: -x[1])
     return scored
 
+def source_support_score(answer: str, query: str, item: dict) -> float:
+    """
+    Score how directly a candidate source supports the final answer.
+
+    Uses:
+    - overlap with user query
+    - overlap with final answer
+    - exact numeric/time/date cue matches
+    """
+    content = item.get("content", "") or ""
+    content_lower = content.lower()
+
+    q_tokens = {t for t in tokenize(query) if t not in STOPWORDS}
+    a_tokens = {t for t in tokenize(answer) if t not in STOPWORDS}
+    c_tokens = tokenize(content)
+
+    overlap_q = len(q_tokens & c_tokens) / max(1, len(q_tokens))
+    overlap_a = len(a_tokens & c_tokens) / max(1, len(a_tokens))
+
+    # Exact number/time cues from answer/query
+    cues = set(re.findall(r"\b\d{1,4}(?::\d{2})?\b", (query or "") + " " + (answer or "")))
+    cue_hits = sum(1 for cue in cues if cue in content_lower)
+
+    # Extra cue words that matter for schedule/admin answers
+    important_words = set()
+    for word in ["online", "in person", "october", "class", "extra class", "pt time"]:
+        if word in (query or "").lower() or word in (answer or "").lower():
+            if word in content_lower:
+                important_words.add(word)
+
+    score = (0.6 * overlap_q) + (0.4 * overlap_a)
+    score += min(cue_hits * 0.08, 0.24)
+    score += min(len(important_words) * 0.08, 0.24)
+
+    return score
+
+
+def filter_supporting_sources(answer: str, query: str, items: list[dict], max_sources: int = 3) -> list[dict]:
+    """
+    Keep only the sources that actually provide strong support.
+    Avoid returning extra weakly-related sources.
+    """
+    if not items:
+        return []
+
+    scored = [(item, source_support_score(answer, query, item)) for item in items]
+    scored.sort(key=lambda x: -x[1])
+
+    best = scored[0][1]
+
+    # Keep only items that are reasonably close to the best source
+    kept = [
+        item for item, sc in scored
+        if sc >= max(0.08, best * 0.55)
+    ]
+
+    # Fallback: always keep at least the strongest source
+    if not kept:
+        kept = [scored[0][0]]
+
+    return kept[:max_sources]
+
 def is_contacts_question(q: str) -> bool:
     ql = (q or "").lower()
     return any(k in ql for k in [
@@ -1909,6 +1971,9 @@ ANSWER:
             if regulatory_selected:
                 selected_items = regulatory_selected
 
+        # NEW: remove weakly-related sources
+        selected_items = filter_supporting_sources(clean_answer, q, selected_items)
+
         final_sources_text = format_sources(selected_items)
         final_sources_structured = build_structured_sources(selected_items)
 
@@ -1926,7 +1991,7 @@ ANSWER:
                 if filtered_items:
                     fallback_items = filtered_items
 
-            fallback_items = fallback_items[:3]
+            fallback_items = filter_supporting_sources(clean_answer, q, fallback_items)
             used_source_ids = [item["id"] for item in fallback_items]
 
             final_sources_text = format_sources(fallback_items)
