@@ -500,13 +500,15 @@ def compress_doc(doc: str, query_text: str, mode: str = "generic") -> str:
             if not s:
                 continue
 
-            # Keep row-like fields and legend lines as they are
-            if (
-                ":" in s
-                or "D deliver chapter on Moodle" in s
-                or "P Present" in s
-                or s.lower().startswith("table:")
-            ):
+            if s.lower().startswith("table:"):
+                keep.append(s)
+                continue
+
+            if ":" in s:
+                keep.append(s)
+                continue
+
+            if "D deliver chapter on Moodle" in s or "P Present" in s:
                 keep.append(s)
 
         if keep:
@@ -701,6 +703,8 @@ INLINE_SOURCE_TAG_RE = re.compile(r"\[SOURCE_ID:\s*S\d+\|[^\]]+\]", re.IGNORECAS
 SOURCE_ATTRIBUTION_LINE_RE = re.compile(
     r"(?im)^\s*(?:"
     r"this information(?: is| was)?(?: explicitly)? stated in|"
+    r"this information is directly supported by the context provided|"
+    r"the context directly supports this information|"
     r"this definition(?: can be| is)? found in|"
     r"according to|"
     r"supported by|"
@@ -1108,17 +1112,32 @@ def parse_schedule_intent(q: str) -> dict:
 
     tm = TRACK_RE.search(q)
     if tm:
-        out["track"] = tm.group(1).lower()
+        raw_track = tm.group(1).lower()
+        if raw_track in {"thesis", "tese"}:
+            out["track"] = "thesis"
+        elif raw_track in {"project", "projeto"}:
+            out["track"] = "project"
 
-    if any(x in ql for x in ["deliver", "delivered", "deliverable", "what has to be delivered"]):
+    if any(x in ql for x in [
+        "deliver", "delivered", "deliverable", "what has to be delivered",
+        "entregar", "entregue", "entrega", "o que tenho de entregar"
+    ]):
         out["field"] = "track_cell"
-    elif "evaluation" in ql or "%" in ql:
+    elif any(x in ql for x in [
+        "evaluation", "%", "vale", "avaliação", "avaliacao", "percentagem", "peso"
+    ]):
         out["field"] = "evaluation"
-    elif "time" in ql:
+    elif any(x in ql for x in [
+        "time", "hora", "horário", "horario"
+    ]):
         out["field"] = "time"
-    elif "hybrid" in ql or "online" in ql or "in person" in ql:
+    elif any(x in ql for x in [
+        "hybrid", "online", "in person", "híbrido", "hibrido", "presencial"
+    ]):
         out["field"] = "hybrid"
-    elif "chapter" in ql:
+    elif any(x in ql for x in [
+        "chapter", "capítulo", "capitulo"
+    ]):
         out["field"] = "chapter"
 
     return out
@@ -1287,6 +1306,89 @@ def abbreviation_chunk_quality(doc: str, meta: dict, query_text: str) -> float:
     if q_caps:
         hits = sum(1 for x in q_caps if re.search(rf"(?<![A-Za-z0-9]){re.escape(x)}(?![A-Za-z0-9])", doc))
         score += min(hits * 0.12, 0.30)
+
+    return score
+
+def schedule_chunk_quality(doc: str, meta: dict, query_text: str, intent: dict) -> float:
+    """
+    Score schedule/table chunks using exact row/track/field alignment.
+    This improves retrieval for table questions without hardcoding the answer.
+    """
+    doc = doc or ""
+    meta = meta or {}
+    score = 0.0
+
+    chunk_type = (meta.get("chunk_type") or "").lower()
+    source = (meta.get("source") or "").lower()
+    title_hint = (meta.get("title_hint") or "").lower()
+
+    class_num = intent.get("class_num")
+    track = intent.get("track")
+    field = intent.get("field")
+
+    # Base preference for structured schedule chunks
+    if chunk_type == "table_row":
+        score += 0.70
+    elif chunk_type == "table_legend":
+        score += 0.35
+    elif chunk_type == "item":
+        score += 0.05   # weak fallback only
+    else:
+        score -= 0.10
+
+    if "schedule" in source or "schedule" in title_hint or "calendar" in source or "calendar" in title_hint:
+        score += 0.25
+
+    # Strong exact class-row match
+    if class_num is not None:
+        m = re.search(r"(?im)^Class\s*#:\s*(\d+)\s*$", doc)
+        if m:
+            row_num = int(m.group(1))
+            if row_num == class_num:
+                score += 1.25
+            else:
+                score -= 0.75
+        elif chunk_type == "table_row":
+            score -= 0.40
+
+    # Track alignment
+    if track == "thesis":
+        if re.search(r"(?im)^Thesis:\s*(.+)$", doc):
+            score += 0.35
+        if re.search(r"(?im)^Project:\s*(.+)$", doc):
+            score -= 0.10
+
+    if track == "project":
+        if re.search(r"(?im)^Project:\s*(.+)$", doc):
+            score += 0.35
+        if re.search(r"(?im)^Thesis:\s*(.+)$", doc):
+            score -= 0.10
+
+    # Requested field alignment
+    if field == "track_cell":
+        if track == "thesis" and re.search(r"(?im)^Thesis:\s*(.+)$", doc):
+            score += 0.35
+        if track == "project" and re.search(r"(?im)^Project:\s*(.+)$", doc):
+            score += 0.35
+
+    elif field == "evaluation" and re.search(r"(?im)^Evaluation\s*\(%\):\s*(.+)$", doc):
+        score += 0.30
+
+    elif field == "time" and re.search(r"(?im)^Time:\s*(.+)$", doc):
+        score += 0.30
+
+    elif field == "hybrid" and re.search(r"(?im)^Hybrid:\s*(.+)$", doc):
+        score += 0.30
+
+    elif field == "chapter" and re.search(r"(?im)^Chapter:\s*(.+)$", doc):
+        score += 0.30
+
+    # Legend chunks are useful mainly for abbreviation-heavy cells
+    if chunk_type == "table_legend":
+        if re.search(r"(?i)\bD\s+deliver\b", doc) and re.search(r"(?i)\bP\s+present\b", doc):
+            score += 0.20
+        if field != "track_cell" and not re.search(r"\b[Dd]\+?[Pp]?\b", query_text or ""):
+            score -= 0.10
 
     return score
 
@@ -1650,14 +1752,7 @@ def ask(data: Query):
                 score += abbreviation_chunk_quality(doc, meta, q_for_retrieval)
                 
             if want_schedule:
-                chunk_type = (meta or {}).get("chunk_type", "")
-                if chunk_type == "table_row":
-                    score += 0.70
-                elif chunk_type == "table_legend":
-                    score += 0.45
-
-                if "schedule" in src.lower():
-                    score += 0.25
+                score += schedule_chunk_quality(doc, meta, q_for_retrieval, schedule_intent)
 
             # Canonical priority-source boosts
             if effective_priority_sources and is_priority_source(src, effective_priority_sources):
@@ -1700,13 +1795,7 @@ def ask(data: Query):
     if want_schedule:
         schedule_candidates = [
             c for c in candidates
-            if (
-                ((c[1] or {}).get("chunk_type", "") in {"table_row", "table_legend", "item"})
-                or "schedule" in ((c[1] or {}).get("source", "") or "").lower()
-                or "schedule" in ((c[1] or {}).get("title_hint", "") or "").lower()
-                or "calendar" in ((c[1] or {}).get("source", "") or "").lower()
-                or "calendar" in ((c[1] or {}).get("title_hint", "") or "").lower()
-            )
+            if schedule_chunk_quality(c[0], c[1], q_for_retrieval, schedule_intent) > 0
         ]
         if schedule_candidates:
             candidates = schedule_candidates
@@ -1853,106 +1942,128 @@ def ask(data: Query):
     # -----------------------------
     top = []
     used = set()
-
-    # 1) Priority source selection
-    priority_candidates = [
-        c for c in candidates
-        if is_priority_source((c[1] or {}).get("source", ""), effective_priority_sources)
-        and (
-            not want_contacts
-            or contact_chunk_quality(c[0], c[1]) > 0.10
+    
+    if want_schedule:
+        candidates.sort(
+            key=lambda x: (-schedule_chunk_quality(x[0], x[1], q_for_retrieval, schedule_intent), x[2])
         )
-    ]
 
-    priority_limit = max(
-        MIN_PRIORITY_CHUNKS,
-        int(MAX_CHUNKS_LOCAL * PRIORITY_RATIO)
-    )
+        top = []
+        used = set()
 
-    if priority_candidates:
+        for c in candidates:
+            doc, meta, dist, score = c
+            k = doc_key(doc, meta)
+            if k in used:
+                continue
+
+            top.append(c)
+            used.add(k)
+
+            # For schedule/table questions, keep the context very tight:
+            # usually one row + legend + maybe one fallback item.
+            if len(top) >= 3:
+                break
+    else:
+
+        # 1) Priority source selection
+        priority_candidates = [
+            c for c in candidates
+            if is_priority_source((c[1] or {}).get("source", ""), effective_priority_sources)
+            and (
+                not want_contacts
+                or contact_chunk_quality(c[0], c[1]) > 0.10
+            )
+        ]
+
+        priority_limit = max(
+            MIN_PRIORITY_CHUNKS,
+            int(MAX_CHUNKS_LOCAL * PRIORITY_RATIO)
+        )
+
+        if priority_candidates:
+            if want_contacts:
+                def priority_rank(c):
+                    doc, meta, dist, score = c
+                    doc = doc or ""
+                    hits = 0
+
+                    if TEACHER_LABEL_RE.search(doc):
+                        hits += 2
+                    if NOV_AFFIL_EMAIL_RE.search(doc):
+                        hits += 2
+                    if EMAIL_RE.search(doc):
+                        hits += 1
+                    if EXAMPLE_EMAIL_RE.search(doc):
+                        hits -= 2
+                    if EXERCISE_TABLE_RE.search(doc):
+                        hits -= 1
+
+                    if additive_followup:
+                        hits += int(contact_novelty_bonus(doc, known_names, known_emails) * 10)
+
+                    return (-hits, -score, dist)
+
+                priority_candidates.sort(key=priority_rank)
+            else:
+                priority_candidates.sort(key=lambda x: (-x[3], x[2]))
+
+            for c in priority_candidates[:priority_limit]:
+                k = doc_key(c[0], c[1])
+                if k not in used:
+                    top.append(c)
+                    used.add(k)
+
+        # 2) Diversity-by-source fill (best 2 per source)
         if want_contacts:
-            def priority_rank(c):
+            per_group = {}
+            for c in candidates:
                 doc, meta, dist, score = c
-                doc = doc or ""
-                hits = 0
+                src = (meta or {}).get("source", "unknown.pdf")
+                page = safe_int((meta or {}).get("page"))
+                key = (src, page)
+                per_group.setdefault(key, []).append(c)
 
-                if TEACHER_LABEL_RE.search(doc):
-                    hits += 2
-                if NOV_AFFIL_EMAIL_RE.search(doc):
-                    hits += 2
-                if EMAIL_RE.search(doc):
-                    hits += 1
-                if EXAMPLE_EMAIL_RE.search(doc):
-                    hits -= 2
-                if EXERCISE_TABLE_RE.search(doc):
-                    hits -= 1
+            for key in per_group:
+                per_group[key].sort(key=lambda x: (-x[3], x[2]))
+                per_group[key] = per_group[key][:3]  # allow a few sibling chunks from same page
 
-                if additive_followup:
-                    hits += int(contact_novelty_bonus(doc, known_names, known_emails) * 10)
+            diverse = []
+            for items in per_group.values():
+                diverse.extend(items)
+            diverse.sort(key=lambda x: (-x[3], x[2]))
 
-                return (-hits, -score, dist)
-
-            priority_candidates.sort(key=priority_rank)
         else:
-            priority_candidates.sort(key=lambda x: (-x[3], x[2]))
+            per_source = {}
+            for c in candidates:
+                doc, meta, dist, score = c
+                src = (meta or {}).get("source", "unknown.pdf")
+                per_source.setdefault(src, []).append(c)
 
-        for c in priority_candidates[:priority_limit]:
+            for src in per_source:
+                per_source[src].sort(key=lambda x: (-x[3], x[2]))
+                per_source[src] = per_source[src][:2]
+
+            diverse = []
+            for items in per_source.values():
+                diverse.extend(items)
+            diverse.sort(key=lambda x: (-x[3], x[2]))
+
+        for c in diverse:
+            if len(top) >= MAX_CHUNKS_LOCAL:
+                break
             k = doc_key(c[0], c[1])
             if k not in used:
                 top.append(c)
                 used.add(k)
-
-    # 2) Diversity-by-source fill (best 2 per source)
-    if want_contacts:
-        per_group = {}
-        for c in candidates:
-            doc, meta, dist, score = c
-            src = (meta or {}).get("source", "unknown.pdf")
-            page = safe_int((meta or {}).get("page"))
-            key = (src, page)
-            per_group.setdefault(key, []).append(c)
-
-        for key in per_group:
-            per_group[key].sort(key=lambda x: (-x[3], x[2]))
-            per_group[key] = per_group[key][:3]  # allow a few sibling chunks from same page
-
-        diverse = []
-        for items in per_group.values():
-            diverse.extend(items)
-        diverse.sort(key=lambda x: (-x[3], x[2]))
-
-    else:
-        per_source = {}
-        for c in candidates:
-            doc, meta, dist, score = c
-            src = (meta or {}).get("source", "unknown.pdf")
-            per_source.setdefault(src, []).append(c)
-
-        for src in per_source:
-            per_source[src].sort(key=lambda x: (-x[3], x[2]))
-            per_source[src] = per_source[src][:2]
-
-        diverse = []
-        for items in per_source.values():
-            diverse.extend(items)
-        diverse.sort(key=lambda x: (-x[3], x[2]))
-
-    for c in diverse:
-        if len(top) >= MAX_CHUNKS_LOCAL:
-            break
-        k = doc_key(c[0], c[1])
-        if k not in used:
-            top.append(c)
-            used.add(k)
+                
+        if want_contacts:
+            top = expand_same_page_siblings(collection, top, max_extra=6)
             
-    if want_contacts:
-        top = expand_same_page_siblings(collection, top, max_extra=6)
-        
-    if is_global_scope:
-        top = expand_adjacent_regulation_pages(collection, top, max_extra=4)
-        top.sort(key=lambda x: (-x[3], x[2]))
-
-    
+        if is_global_scope:
+            top = expand_adjacent_regulation_pages(collection, top, max_extra=4)
+            top.sort(key=lambda x: (-x[3], x[2]))
+            
     context_mode = "generic"
     if want_contacts:
         context_mode = "contacts"
@@ -1968,7 +2079,7 @@ def ask(data: Query):
     )
     
     rerank_context_ms = round((time.perf_counter() - t0_rerank) * 1000, 1)
-
+    
     if want_contacts and additive_followup and not source_map_has_new_contact_payload(used_sources, known_names, known_emails):
         fallback_top = [
             c for c in candidates
@@ -2090,6 +2201,9 @@ Instructions:
 - If the question refers to the thesis track or project track, use the corresponding field from that same class row.
 - If abbreviations such as D or P appear, use explicit legend lines when available.
 - When answering schedule questions, prefer exact extraction from the relevant row over general summarization.
+- For schedule/table questions, never infer or borrow information from another class row.
+- If the exact row is present, answer only from that row and any explicit legend lines.
+- If multiple class rows are present in the context, ignore rows with a different class number.
 - Answer in the same language as the user's QUESTION.
 - If the QUESTION is in Portuguese, answer strictly in European Portuguese (Português de Portugal), never in Brazilian Portuguese.
 - If the QUESTION is in English, answer in English.
