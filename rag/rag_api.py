@@ -175,6 +175,15 @@ DEFINITION_QUESTION_RE = re.compile(
     re.IGNORECASE
 )
 
+ABBREV_QUESTION_RE = re.compile(
+    r"\b(what do .+ mean|what does .+ mean|o que quer dizer|o que significa)\b",
+    re.IGNORECASE
+)
+
+ABBREV_EXPLANATION_RE = re.compile(
+    r"(?im)\b[A-Z]\s*(?:=|means|stands for)?\s+[A-Za-z].+"
+)
+
 DB_PREFIX = os.getenv("MOODLE_DB_PREFIX", "m_")
 
 DB = {
@@ -419,6 +428,39 @@ def compress_doc(doc: str, query_text: str, mode: str = "generic") -> str:
 
             if is_label or is_email:
                 # Keep a window around the hit so we do not lose the person name / role.
+                for j in range(max(0, i - 2), min(len(lines), i + 3)):
+                    lj = lines[j].strip()
+                    if lj:
+                        keep.append(lj)
+
+        if keep:
+            out = []
+            seen = set()
+            for l in keep:
+                if l not in seen:
+                    out.append(l)
+                    seen.add(l)
+                if len(out) >= MAX_LINES_PER_CHUNK:
+                    break
+            return "\n".join(out)
+
+        return doc or ""
+    
+    # -----------------------------
+    # Abbreviation / legend mode
+    # Preserve legend lines and small windows around them
+    # -----------------------------
+    if mode == "abbrev":
+        keep = []
+
+        for i, line in enumerate(lines):
+            s = line.strip()
+            if not s:
+                continue
+
+            if ABBREV_EXPLANATION_RE.search(s) or (
+                re.search(r"(?im)\bD\s+deliver\b", s) or re.search(r"(?im)\bP\s+present\b", s)
+            ):
                 for j in range(max(0, i - 2), min(len(lines), i + 3)):
                     lj = lines[j].strip()
                     if lj:
@@ -724,49 +766,6 @@ def normalize_formula_text(text: str, mode: str = "plain") -> str:
     t = re.sub(r"\n{3,}", "\n\n", t)
 
     return t.strip()
-    """
-    Convert common LaTeX-like or pseudo-math fragments into either:
-    - plain text formulas, or
-    - proper $$...$$ math blocks for frontend rendering.
-    """
-
-    t = (text or "").strip()
-
-    # 1) Remove \text{...} wrappers but preserve content
-    t = re.sub(r"\\text\{([^{}]+)\}", r"\1", t)
-
-    # 2) Convert \[ ... \] or [ ... ] pseudo display math to something cleaner
-    # Case A: \[ ... \]
-    t = re.sub(r"\\\[\s*(.+?)\s*\\\]", r"@@MATH@@\1@@ENDMATH@@", t, flags=re.DOTALL)
-
-    # Case B: [ ... ] on its own line
-    t = re.sub(r"(?m)^\[\s*(.+?)\s*\]$", r"@@MATH@@\1@@ENDMATH@@", t)
-
-    # 3) Convert \frac{A}{B}
-    frac_re = re.compile(r"\\frac\{([^{}]+)\}\{([^{}]+)\}")
-    while frac_re.search(t):
-        if mode == "plain":
-            t = frac_re.sub(r"(\1) / (\2)", t)
-        else:
-            t = frac_re.sub(r"\\frac{\1}{\2}", t)
-
-    # 4) Convert existing $...$ / $$...$$ if mode is plain
-    if mode == "plain":
-        t = re.sub(r"\$\$(.+?)\$\$", r"\1", t, flags=re.DOTALL)
-        t = re.sub(r"\$(.+?)\$", r"\1", t, flags=re.DOTALL)
-
-    # 5) Final format for extracted math blocks
-    if mode == "plain":
-        t = re.sub(r"@@MATH@@\s*(.+?)\s*@@ENDMATH@@", r"\1", t, flags=re.DOTALL)
-    else:
-        t = re.sub(r"@@MATH@@\s*(.+?)\s*@@ENDMATH@@", r"$$\1$$", t, flags=re.DOTALL)
-
-    # 6) Simplify obvious repeated whitespace
-    t = re.sub(r"[ \t]+", " ", t)
-    t = re.sub(r" *\n *", "\n", t)
-    t = re.sub(r"\n{3,}", "\n\n", t)
-
-    return t.strip()
 
 def extract_used_source_ids(answer: str, source_map: list[dict]):
     """
@@ -1043,6 +1042,9 @@ def is_definition_question(q: str) -> bool:
     
 def is_eligibility_question(q: str) -> bool:
     return bool(ELIGIBILITY_QUESTION_RE.search(q or ""))
+
+def is_abbreviation_question(q: str) -> bool:
+    return bool(ABBREV_QUESTION_RE.search(q or ""))
     
 def is_priority_source(src: str, priority_sources: list[str] | None = None) -> bool:
     if not src:
@@ -1174,6 +1176,40 @@ def policy_chunk_quality(doc: str, meta: dict, query_text: str, is_global_scope:
     # Slight boost for formal rule-style chunks
     if "artigo" in doc.lower():
         score += 0.10
+
+    return score
+
+def abbreviation_chunk_quality(doc: str, meta: dict, query_text: str) -> float:
+    doc = doc or ""
+    meta = meta or {}
+    q = (query_text or "").lower()
+    score = 0.0
+
+    # Strong signal: explicit abbreviation explanation lines
+    if ABBREV_EXPLANATION_RE.search(doc):
+        score += 0.55
+
+    # Very strong signal for schedule legends such as:
+    # D deliver chapter on Moodle, P Present (5 min each)
+    if re.search(r"(?im)\bD\s+deliver\b", doc) and re.search(r"(?im)\bP\s+present\b", doc):
+        score += 0.90
+
+    # Schedule/calendar style chunks are more likely to contain this
+    section_type = (meta.get("section_type") or "").lower()
+    source = (meta.get("source") or "").lower()
+    title_hint = (meta.get("title_hint") or "").lower()
+
+    if section_type == "schedule":
+        score += 0.20
+
+    if "schedule" in source or "schedule" in title_hint or "calendar" in source or "calendar" in title_hint:
+        score += 0.20
+
+    # Small bonus if the exact abbreviations mentioned in the question appear in the chunk
+    q_caps = re.findall(r"\b[A-Z]\b", query_text or "")
+    if q_caps:
+        hits = sum(1 for x in q_caps if re.search(rf"(?<![A-Za-z0-9]){re.escape(x)}(?![A-Za-z0-9])", doc))
+        score += min(hits * 0.12, 0.30)
 
     return score
 
@@ -1382,6 +1418,7 @@ def ask(data: Query):
     want_policy = is_global_scope and is_policy_question(q_for_retrieval)
     want_eligibility = is_global_scope and is_eligibility_question(q_for_retrieval)
     want_definition = is_definition_question(q_for_retrieval)
+    want_abbrev = is_abbreviation_question(q_for_retrieval)
 
     # Base debug payload (will be enriched throughout the pipeline)
     debug_info = {
@@ -1394,6 +1431,7 @@ def ask(data: Query):
         "want_policy": want_policy,
         "want_eligibility": want_eligibility,
         "want_definition": want_definition,
+        "want_abbrev": want_abbrev,
     }
     
     effective_priority_sources = (
@@ -1469,9 +1507,10 @@ def ask(data: Query):
     additive_followup = want_contacts and is_additive_followup(q)
     known_names, known_emails = extract_known_contact_entities(data.history) if want_contacts else (set(), set())
     
+
     if want_contacts:
         MAX_CHUNKS_LOCAL = 8
-    elif want_definition:
+    elif want_definition or want_abbrev:
         MAX_CHUNKS_LOCAL = 8
     else:
         MAX_CHUNKS_LOCAL = MAX_CHUNKS
@@ -1515,6 +1554,9 @@ def ask(data: Query):
 
                 if additive_followup:
                     score += contact_novelty_bonus(doc, known_names, known_emails)
+                    
+            if want_abbrev:
+                score += abbreviation_chunk_quality(doc, meta, q_for_retrieval)
 
             # Canonical priority-source boosts
             if effective_priority_sources and is_priority_source(src, effective_priority_sources):
@@ -1540,7 +1582,18 @@ def ask(data: Query):
         "after_policy_filter": len(candidates),
         "after_eligibility_filter": len(candidates),
         "after_contact_filter": len(candidates),
+        "after_abbrev_filter": len(candidates),
     }
+    
+    if want_abbrev:
+        abbrev_candidates = [
+            c for c in candidates
+            if abbreviation_chunk_quality(c[0], c[1], q_for_retrieval) > 0
+        ]
+        if abbrev_candidates:
+            candidates = abbrev_candidates
+            
+    debug_candidate_counts["after_abbrev_filter"] = len(candidates)
     
     if is_global_scope:
         regulatory_candidates = [
@@ -1781,10 +1834,16 @@ def ask(data: Query):
         top = expand_adjacent_regulation_pages(collection, top, max_extra=4)
         top.sort(key=lambda x: (-x[3], x[2]))
 
+    context_mode = "generic"
+    if want_contacts:
+        context_mode = "contacts"
+    elif want_abbrev:
+        context_mode = "abbrev"
+
     context, used_sources = pack_context(
         top,
         q_mix,
-        mode="contacts" if want_contacts else "generic"
+        mode=context_mode
     )
     
     rerank_context_ms = round((time.perf_counter() - t0_rerank) * 1000, 1)
@@ -1903,6 +1962,7 @@ Instructions:
 - In that case, look for additional supported items not already mentioned in the chat.
 - If no additional supported items exist in the CONTEXT, say so clearly.
 - For short factual or definitional questions, answer in 1-3 sentences unless the question explicitly asks for more detail.
+- If the question asks about the meaning of abbreviations, symbols, or short labels, prefer explicit legend or explanatory lines over repeated occurrences of the abbreviations.
 - Answer in the same language as the user's QUESTION.
 - If the QUESTION is in Portuguese, answer strictly in European Portuguese (Português de Portugal), never in Brazilian Portuguese.
 - If the QUESTION is in English, answer in English.
@@ -1973,6 +2033,17 @@ ANSWER:
 
         # NEW: remove weakly-related sources
         selected_items = filter_supporting_sources(clean_answer, q, selected_items)
+        
+        if want_abbrev:
+            legend_like = [
+                item for item in selected_items
+                if abbreviation_chunk_quality(item.get("content", ""), item, q_for_retrieval) > 0.4
+            ]
+            if legend_like:
+                legend_like.sort(
+                    key=lambda x: -abbreviation_chunk_quality(x.get("content", ""), x, q_for_retrieval)
+                )
+                selected_items = [legend_like[0]]
 
         final_sources_text = format_sources(selected_items)
         final_sources_structured = build_structured_sources(selected_items)
@@ -1992,6 +2063,17 @@ ANSWER:
                     fallback_items = filtered_items
 
             fallback_items = filter_supporting_sources(clean_answer, q, fallback_items)
+            
+            if want_abbrev:
+                legend_like = [
+                    item for item in fallback_items
+                    if abbreviation_chunk_quality(item.get("content", ""), item, q_for_retrieval) > 0.4
+                ]
+                if legend_like:
+                    legend_like.sort(
+                        key=lambda x: -abbreviation_chunk_quality(x.get("content", ""), x, q_for_retrieval)
+                    )
+                    fallback_items = [legend_like[0]]
             used_source_ids = [item["id"] for item in fallback_items]
 
             final_sources_text = format_sources(fallback_items)
@@ -2019,6 +2101,7 @@ ANSWER:
             "want_policy": want_policy,
             "want_contacts": want_contacts,
             "want_eligibility": want_eligibility,
+            "want_abbrev": want_abbrev,
             "best_dist": best_dist,
             "effective_priority_sources": effective_priority_sources,
             "top_sources": used_sources,

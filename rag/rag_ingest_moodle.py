@@ -66,6 +66,7 @@ MODULE_CONTEXTLEVEL = 70
 MAX_BLOCK_CHARS = int(os.getenv("RAG_MAX_BLOCK_CHARS", "1200"))
 BLOCK_OVERLAP = int(os.getenv("RAG_BLOCK_OVERLAP", "160"))
 MIN_TEXT_CHARS = int(os.getenv("RAG_MIN_TEXT_CHARS", "30"))
+MIN_MOODLE_TEXT_CHARS = int(os.getenv("RAG_MIN_MOODLE_TEXT_CHARS", "8"))
 
 # -----------------------------
 # REGEX / LABELS
@@ -175,45 +176,6 @@ def html_to_clean_text(html: str) -> str:
     text = text.replace("\xa0", " ")
     text = re.sub(r"[ \t]+", " ", text)
     text = re.sub(r" *\| *", " | ", text)
-    text = re.sub(r"\n\s*\n+", "\n\n", text)
-    return normalize(text)
-    """
-    Convert Moodle HTML content into clean plain text while preserving basic structure.
-    """
-    if not html:
-        return ""
-
-    html = unescape(html)
-
-    if BeautifulSoup is None:
-        return strip_html_fallback(html)
-
-    soup = BeautifulSoup(html, "html.parser")
-
-    # Convert structural tags into explicit separators
-    for tag in soup.find_all(["br"]):
-        tag.replace_with("\n")
-
-    for tag in soup.find_all(["p", "div", "section"]):
-        tag.insert_after("\n")
-
-    for tag in soup.find_all(["li"]):
-        if tag.string:
-            tag.string.replace_with(f"- {tag.get_text(strip=True)}")
-        else:
-            tag.insert(0, "- ")
-        tag.insert_after("\n")
-
-    for tag in soup.find_all(["h1", "h2", "h3", "h4", "h5", "h6"]):
-        tag.insert_before("\n")
-        tag.insert_after("\n")
-
-    for tag in soup.find_all(["tr"]):
-        tag.insert_after("\n")
-
-    text = soup.get_text(separator=" ")
-    text = text.replace("\xa0", " ")
-    text = re.sub(r"[ \t]+", " ", text)
     text = re.sub(r"\n\s*\n+", "\n\n", text)
     return normalize(text)
 
@@ -1188,6 +1150,7 @@ def build_records_for_pdf(courseid: int, contenthash: str, filename: str, contex
 
     return ids, docs, metas
 
+
 def build_records_for_moodle_text(courseid: int, item: Dict) -> Tuple[List[str], List[str], List[Dict]]:
     """
     Convert one Moodle-native text item into Chroma upsert records.
@@ -1195,17 +1158,8 @@ def build_records_for_moodle_text(courseid: int, item: Dict) -> Tuple[List[str],
     raw_html = item.get("html", "") or ""
     cleaned_text = html_to_clean_text(raw_html)
 
-    if len(cleaned_text) < MIN_TEXT_CHARS:
+    if len(cleaned_text) < MIN_MOODLE_TEXT_CHARS:
         return [], [], []
-
-    blocks = split_into_structured_blocks(cleaned_text)
-
-    if not blocks:
-        return [], [], []
-
-    ids: List[str] = []
-    docs: List[str] = []
-    metas: List[Dict] = []
 
     base_id = f"moodle:{courseid}:{item['item_type']}:{item['item_id']}"
     title = item.get("title", "") or item.get("item_type", "Moodle text")
@@ -1214,6 +1168,42 @@ def build_records_for_moodle_text(courseid: int, item: Dict) -> Tuple[List[str],
     cmid = item.get("cmid", None)
     sectionnum = item.get("sectionnum", None)
     contextlevel = int(item.get("contextlevel", COURSE_CONTEXTLEVEL))
+
+    if source_type in {"label", "section_summary"} and infer_section_type(cleaned_text) == "schedule":
+        blocks = [cleaned_text]
+    else:
+        blocks = split_into_structured_blocks(cleaned_text)
+
+    if not blocks:
+        return [], [], []
+
+    ids: List[str] = []
+    docs: List[str] = []
+    metas: List[Dict] = []
+
+    # FULL ITEM FALLBACK CHUNK
+    full_rec_id = f"{base_id}:full"
+    ids.append(full_rec_id)
+    docs.append(cleaned_text)
+    metas.append({
+        "courseid": int(courseid),
+        "source": title,
+        "page": -1,
+        "chunk_index": -1,
+        "contextlevel": contextlevel,
+        "section_type": infer_section_type(cleaned_text),
+        "title_hint": title,
+        "contenthash": "",
+        "chunk_type": "item",
+        "doc_kind": "moodle_text",
+        "article_number": "",
+        "article_title": "",
+        "chapter_title": "",
+        "source_type": source_type,
+        "module_name": module_name,
+        "cmid": int(cmid) if cmid is not None else -1,
+        "sectionnum": int(sectionnum) if sectionnum is not None else -1,
+    })
 
     for chunk_index, block in enumerate(blocks):
         rec_id = f"{base_id}:c{chunk_index}"
@@ -1317,7 +1307,7 @@ if __name__ == "__main__":
         print(f"[INFO] Single-course mode: TARGET_COURSE_ID={TARGET_COURSE_ID}")
     else:
         course_ids = get_all_course_ids_with_content()
-        print(f"[INFO] All-courses mode: found {len(course_ids)} course(s) with PDFs")
+        print(f"[INFO] All-courses mode: found {len(course_ids)} course(s) with content")
 
     for cid in course_ids:
         try:
