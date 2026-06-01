@@ -184,6 +184,15 @@ ABBREV_EXPLANATION_RE = re.compile(
     r"(?im)\b[A-Z]\s*(?:=|means|stands for)?\s+[A-Za-z].+"
 )
 
+SCHEDULE_QUESTION_RE = re.compile(
+    r"\b(class schedule|schedule|calendar|class\s+\d+|thesis track|project track|"
+    r"horário|calendário|aula\s+\d+|tese|projeto)\b",
+    re.IGNORECASE
+)
+
+CLASS_NUM_RE = re.compile(r"\b(?:class|aula)\s+(\d+)\b", re.IGNORECASE)
+TRACK_RE = re.compile(r"\b(thesis|project|tese|projeto)\b", re.IGNORECASE)
+
 DB_PREFIX = os.getenv("MOODLE_DB_PREFIX", "m_")
 
 DB = {
@@ -465,6 +474,40 @@ def compress_doc(doc: str, query_text: str, mode: str = "generic") -> str:
                     lj = lines[j].strip()
                     if lj:
                         keep.append(lj)
+
+        if keep:
+            out = []
+            seen = set()
+            for l in keep:
+                if l not in seen:
+                    out.append(l)
+                    seen.add(l)
+                if len(out) >= MAX_LINES_PER_CHUNK:
+                    break
+            return "\n".join(out)
+
+        return doc or ""
+    
+    # -----------------------------
+    # Schedule / table mode
+    # Preserve complete table rows and legends
+    # -----------------------------
+    if mode == "schedule":
+        keep = []
+
+        for i, line in enumerate(lines):
+            s = line.strip()
+            if not s:
+                continue
+
+            # Keep row-like fields and legend lines as they are
+            if (
+                ":" in s
+                or "D deliver chapter on Moodle" in s
+                or "P Present" in s
+                or s.lower().startswith("table:")
+            ):
+                keep.append(s)
 
         if keep:
             out = []
@@ -1045,6 +1088,40 @@ def is_eligibility_question(q: str) -> bool:
 
 def is_abbreviation_question(q: str) -> bool:
     return bool(ABBREV_QUESTION_RE.search(q or ""))
+
+def is_schedule_question(q: str) -> bool:
+    return bool(SCHEDULE_QUESTION_RE.search(q or ""))
+
+
+def parse_schedule_intent(q: str) -> dict:
+    ql = (q or "").lower()
+
+    out = {
+        "class_num": None,
+        "track": None,
+        "field": None,
+    }
+
+    m = CLASS_NUM_RE.search(q)
+    if m:
+        out["class_num"] = int(m.group(1))
+
+    tm = TRACK_RE.search(q)
+    if tm:
+        out["track"] = tm.group(1).lower()
+
+    if any(x in ql for x in ["deliver", "delivered", "deliverable", "what has to be delivered"]):
+        out["field"] = "track_cell"
+    elif "evaluation" in ql or "%" in ql:
+        out["field"] = "evaluation"
+    elif "time" in ql:
+        out["field"] = "time"
+    elif "hybrid" in ql or "online" in ql or "in person" in ql:
+        out["field"] = "hybrid"
+    elif "chapter" in ql:
+        out["field"] = "chapter"
+
+    return out
     
 def is_priority_source(src: str, priority_sources: list[str] | None = None) -> bool:
     if not src:
@@ -1212,148 +1289,6 @@ def abbreviation_chunk_quality(doc: str, meta: dict, query_text: str) -> float:
         score += min(hits * 0.12, 0.30)
 
     return score
-
-def extract_abbreviation_answer(question: str, ranked_items, lang: str = "en"):
-    """
-    Try to extract explicit abbreviation meanings directly from the top ranked chunks.
-
-    Strategy:
-    1) look first for a combined legend line such as:
-       D deliver chapter on Moodle, P Present (5 min each)
-    2) if not found, fall back to single-abbreviation patterns,
-       but reject weak extractions like D -> P
-    """
-    q = question or ""
-
-    # Extract single-letter abbreviations explicitly mentioned in the question.
-    requested = [m.upper() for m in re.findall(r"\b([A-Za-z])\b", q)]
-    requested = [x for x in requested if len(x) == 1]
-    requested = list(dict.fromkeys(requested))
-
-    if not requested:
-        return None, []
-
-    found = {}
-    supporting = []
-
-    for doc, meta, dist, score in ranked_items:
-        text = doc or ""
-        if not text.strip():
-            continue
-
-        lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
-
-        # --------------------------------------------------
-        # 1) STRONG PRIORITY:
-        # Look for a legend line containing multiple abbreviations
-        # Example:
-        # D deliver chapter on Moodle, P Present (5 min each)
-        # --------------------------------------------------
-        for line in lines:
-            # Split by commas/semicolons to parse segments separately
-            parts = re.split(r"[;,]\s*", line)
-
-            local_found = {}
-
-            for part in parts:
-                m = re.match(
-                    r"(?i)^\s*([A-Za-z])\s*(?:=|means|stands for)?\s+(.+?)\s*$",
-                    part
-                )
-                if not m:
-                    continue
-
-                key = m.group(1).upper()
-                val = m.group(2).strip(" ,;:-")
-
-                # Reject nonsense values like "P", "D", "D+P", etc.
-                if not val:
-                    continue
-                if re.fullmatch(r"[A-Za-z]", val):
-                    continue
-                if re.fullmatch(r"[A-Za-z]\+[A-Za-z]", val):
-                    continue
-                if len(val) < 4:
-                    continue
-
-                if key in requested:
-                    local_found[key] = val
-
-            # If the same line explains at least one requested abbreviation,
-            # keep it; if it explains all requested abbreviations, return immediately.
-            if local_found:
-                for k, v in local_found.items():
-                    if k not in found:
-                        found[k] = v
-                if meta not in supporting:
-                    supporting.append(meta)
-
-                if all(k in found for k in requested):
-                    break
-
-        if all(k in found for k in requested):
-            break
-
-        # --------------------------------------------------
-        # 2) FALLBACK:
-        # Try line-by-line generic extraction,
-        # but reject weak values like a single capital letter.
-        # --------------------------------------------------
-        for line in lines:
-            m = re.match(
-                r"(?i)^\s*([A-Za-z])\s*(?:=|means|stands for)?\s+(.+?)\s*$",
-                line
-            )
-            if not m:
-                continue
-
-            key = m.group(1).upper()
-            val = m.group(2).strip(" ,;:-")
-
-            if key not in requested:
-                continue
-
-            # Reject bad extractions
-            if not val:
-                continue
-            if re.fullmatch(r"[A-Za-z]", val):
-                continue
-            if re.fullmatch(r"[A-Za-z]\+[A-Za-z]", val):
-                continue
-            if len(val) < 4:
-                continue
-
-            if key not in found:
-                found[key] = val
-                if meta not in supporting:
-                    supporting.append(meta)
-
-        if all(k in found for k in requested):
-            break
-
-    if not found:
-        return None, []
-
-    ordered = [(k, found[k]) for k in requested if k in found]
-    if not ordered:
-        return None, []
-
-    if lang == "pt":
-        if len(ordered) == 1:
-            k, v = ordered[0]
-            answer = f"{k} quer dizer “{v}”."
-        else:
-            parts = [f"{k} quer dizer “{v}”" for k, v in ordered]
-            answer = "; ".join(parts) + "."
-    else:
-        if len(ordered) == 1:
-            k, v = ordered[0]
-            answer = f"{k} means “{v}”."
-        else:
-            parts = [f"{k} means “{v}”" for k, v in ordered]
-            answer = "; ".join(parts) + "."
-
-    return answer, supporting
 
 
 def chunk_has_contact_payload(doc: str) -> bool:
@@ -1562,6 +1497,18 @@ def ask(data: Query):
     want_eligibility = is_global_scope and is_eligibility_question(q_for_retrieval)
     want_definition = is_definition_question(q_for_retrieval)
     want_abbrev = is_abbreviation_question(q_for_retrieval)
+    schedule_intent = parse_schedule_intent(q_for_retrieval)
+
+    want_schedule = bool(
+        is_schedule_question(q_for_retrieval)
+        and (
+            schedule_intent.get("class_num") is not None
+            or "schedule" in q_for_retrieval.lower()
+            or "calendar" in q_for_retrieval.lower()
+            or "thesis track" in q_for_retrieval.lower()
+            or "project track" in q_for_retrieval.lower()
+        )
+    )
 
     # Base debug payload (will be enriched throughout the pipeline)
     debug_info = {
@@ -1575,6 +1522,7 @@ def ask(data: Query):
         "want_eligibility": want_eligibility,
         "want_definition": want_definition,
         "want_abbrev": want_abbrev,
+        "want_schedule": want_schedule,
     }
     
     effective_priority_sources = (
@@ -1653,7 +1601,7 @@ def ask(data: Query):
 
     if want_contacts:
         MAX_CHUNKS_LOCAL = 8
-    elif want_definition or want_abbrev:
+    elif want_definition or want_abbrev or want_schedule:
         MAX_CHUNKS_LOCAL = 8
     else:
         MAX_CHUNKS_LOCAL = MAX_CHUNKS
@@ -1700,6 +1648,16 @@ def ask(data: Query):
                     
             if want_abbrev:
                 score += abbreviation_chunk_quality(doc, meta, q_for_retrieval)
+                
+            if want_schedule:
+                chunk_type = (meta or {}).get("chunk_type", "")
+                if chunk_type == "table_row":
+                    score += 0.70
+                elif chunk_type == "table_legend":
+                    score += 0.45
+
+                if "schedule" in src.lower():
+                    score += 0.25
 
             # Canonical priority-source boosts
             if effective_priority_sources and is_priority_source(src, effective_priority_sources):
@@ -1726,6 +1684,7 @@ def ask(data: Query):
         "after_eligibility_filter": len(candidates),
         "after_contact_filter": len(candidates),
         "after_abbrev_filter": len(candidates),
+        "after_schedule_filter": len(candidates),
     }
     
     if want_abbrev:
@@ -1737,6 +1696,22 @@ def ask(data: Query):
             candidates = abbrev_candidates
             
     debug_candidate_counts["after_abbrev_filter"] = len(candidates)
+    
+    if want_schedule:
+        schedule_candidates = [
+            c for c in candidates
+            if (
+                ((c[1] or {}).get("chunk_type", "") in {"table_row", "table_legend", "item"})
+                or "schedule" in ((c[1] or {}).get("source", "") or "").lower()
+                or "schedule" in ((c[1] or {}).get("title_hint", "") or "").lower()
+                or "calendar" in ((c[1] or {}).get("source", "") or "").lower()
+                or "calendar" in ((c[1] or {}).get("title_hint", "") or "").lower()
+            )
+        ]
+        if schedule_candidates:
+            candidates = schedule_candidates
+            
+    debug_candidate_counts["after_schedule_filter"] = len(candidates)
     
     if is_global_scope:
         regulatory_candidates = [
@@ -1977,9 +1952,12 @@ def ask(data: Query):
         top = expand_adjacent_regulation_pages(collection, top, max_extra=4)
         top.sort(key=lambda x: (-x[3], x[2]))
 
+    
     context_mode = "generic"
     if want_contacts:
         context_mode = "contacts"
+    elif want_schedule:
+        context_mode = "schedule"
     elif want_abbrev:
         context_mode = "abbrev"
 
@@ -2024,47 +2002,6 @@ def ask(data: Query):
                 q_mix,
                 mode="contacts"
             )
-            
-    # -----------------------------------------
-    # Deterministic abbreviation extraction
-    # -----------------------------------------
-    if want_abbrev:
-        direct_answer, direct_support = extract_abbreviation_answer(q, top, user_lang)
-
-        if direct_answer and direct_support:
-            final_sources_text = format_sources(direct_support)
-            final_sources_structured = build_structured_sources(direct_support)
-
-            resp = {
-                "answer": direct_answer,
-                "sources": final_sources_text,
-                "sources_structured": final_sources_structured
-            }
-
-            if DEBUG:
-                resp["debug"] = {
-                    "requested_courseid": data.courseid,
-                    "source_courseid": source_courseid,
-                    "collection_name": collection_name,
-                    "queries": queries,
-                    "q_for_retrieval": q_for_retrieval,
-                    "want_policy": want_policy,
-                    "want_contacts": want_contacts,
-                    "want_eligibility": want_eligibility,
-                    "want_abbrev": want_abbrev,
-                    "abbrev_direct_extraction": True,
-                    "final_sources_text": final_sources_text,
-                    "final_sources_structured": final_sources_structured,
-                    "timing_ms": {
-                        "retrieval": retrieval_ms,
-                        "rerank_and_context": round((time.perf_counter() - t0_rerank) * 1000, 1),
-                        "generation": 0.0,
-                        "total": round((time.perf_counter() - t0_total) * 1000, 1),
-                    },
-                    "context_preview": context[:800]
-                }
-
-            return resp
         
     history_block = build_history_block(data.history)
     system_prompt = build_system_prompt(0 if is_global_scope else data.courseid)
@@ -2148,6 +2085,11 @@ Instructions:
 - If no additional supported items exist in the CONTEXT, say so clearly.
 - For short factual or definitional questions, answer in 1-3 sentences unless the question explicitly asks for more detail.
 - If the question asks about the meaning of abbreviations, symbols, or short labels, prefer explicit legend or explanatory lines over repeated occurrences of the abbreviations.
+- If the CONTEXT contains table rows or schedule rows, match the requested class number, track, and field exactly.
+- Do not combine information from different class rows unless the question explicitly asks for multiple classes.
+- If the question refers to the thesis track or project track, use the corresponding field from that same class row.
+- If abbreviations such as D or P appear, use explicit legend lines when available.
+- When answering schedule questions, prefer exact extraction from the relevant row over general summarization.
 - Answer in the same language as the user's QUESTION.
 - If the QUESTION is in Portuguese, answer strictly in European Portuguese (Português de Portugal), never in Brazilian Portuguese.
 - If the QUESTION is in English, answer in English.
@@ -2287,6 +2229,7 @@ ANSWER:
             "want_contacts": want_contacts,
             "want_eligibility": want_eligibility,
             "want_abbrev": want_abbrev,
+            "want_schedule": want_schedule,
             "best_dist": best_dist,
             "effective_priority_sources": effective_priority_sources,
             "top_sources": used_sources,

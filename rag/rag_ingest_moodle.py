@@ -179,6 +179,130 @@ def html_to_clean_text(html: str) -> str:
     text = re.sub(r"\n\s*\n+", "\n\n", text)
     return normalize(text)
 
+def normalize_table_header(text: str) -> str:
+    t = normalize(text or "")
+    t = re.sub(r"\s+", " ", t).strip()
+    return t
+
+
+def extract_html_tables(html: str) -> List[Dict]:
+    """
+    Extract structured table rows from HTML.
+
+    Returns a list like:
+    [
+        {
+            "table_name": "Class schedule",
+            "headers": [...],
+            "rows": [
+                {"row_index": 1, "cells": {"Class #": "1", "Time": "Wed Oct 15", ...}},
+                ...
+            ]
+        }
+    ]
+    """
+    if not html or BeautifulSoup is None:
+        return []
+
+    soup = BeautifulSoup(unescape(html), "html.parser")
+    tables = soup.find_all("table")
+    results: List[Dict] = []
+
+    for ti, table in enumerate(tables, start=1):
+        rows = table.find_all("tr")
+        if not rows:
+            continue
+
+        headers: List[str] = []
+        data_rows: List[Dict] = []
+
+        # Try to infer a table title from the nearest previous heading
+        table_name = f"Table {ti}"
+        prev = table.find_previous(["h1", "h2", "h3", "h4"])
+        if prev:
+            candidate = normalize(prev.get_text(" ", strip=True))
+            if candidate:
+                table_name = candidate
+
+       # Find header row
+        header_found = False
+
+        for tr_index, tr in enumerate(rows):
+            ths = tr.find_all("th")
+            if ths:
+                headers = [normalize_table_header(th.get_text(" ", strip=True)) for th in ths]
+                header_found = True
+                continue
+
+            tds = tr.find_all("td")
+            if not tds:
+                continue
+
+            values = [normalize(td.get_text(" ", strip=True)) for td in tds]
+            if not any(values):
+                continue
+
+            # Heuristic: first td row may actually be the visual header
+            if not header_found:
+                short_cells = sum(1 for v in values if 0 < len(v) <= 40)
+                nonempty = sum(1 for v in values if v)
+
+                if nonempty >= 3 and short_cells >= max(2, nonempty - 1):
+                    headers = [normalize_table_header(v) for v in values]
+                    header_found = True
+                    continue
+
+                headers = [f"Column {i}" for i in range(1, len(values) + 1)]
+                header_found = True
+
+            # Pad or trim to header size
+            if len(values) < len(headers):
+                values += [""] * (len(headers) - len(values))
+            elif len(values) > len(headers):
+                values = values[:len(headers)]
+
+            cells = dict(zip(headers, values))
+            data_rows.append({
+                "row_index": len(data_rows) + 1,
+                "cells": cells
+            })
+            
+        if data_rows:
+            results.append({
+                "table_name": table_name,
+                "headers": headers,
+                "rows": data_rows
+            })
+
+    return results
+
+
+def build_table_row_text(table_name: str, row: Dict) -> str:
+    parts = [f"Table: {table_name}"]
+    for header, value in row.get("cells", {}).items():
+        if value:
+            parts.append(f"{header}: {value}")
+    return "\n".join(parts).strip()
+
+
+def extract_schedule_legend_chunks(text: str) -> List[str]:
+    """
+    Extract legend-like lines such as:
+    D deliver chapter on Moodle, P Present (5 min each)
+    """
+    text = normalize(text or "")
+    out = []
+
+    # Strong pattern for the known schedule legend
+    m = re.search(
+        r"(?is)(D\s+deliver\s+chapter\s+on\s+Moodle.*?P\s+Present\s*\(5\s*min(?:utes)?\s*each\))",
+        text
+    )
+    if m:
+        out.append(normalize(m.group(1)))
+
+    return out
+
 def format_unix_ts(ts) -> str:
     """
     Convert Moodle Unix timestamp to a readable UTC string.
@@ -1170,12 +1294,12 @@ def build_records_for_moodle_text(courseid: int, item: Dict) -> Tuple[List[str],
     contextlevel = int(item.get("contextlevel", COURSE_CONTEXTLEVEL))
 
     if source_type in {"label", "section_summary"} and infer_section_type(cleaned_text) == "schedule":
-        blocks = [cleaned_text]
+        blocks = []
     else:
         blocks = split_into_structured_blocks(cleaned_text)
 
     if not blocks:
-        return [], [], []
+        blocks = []
 
     ids: List[str] = []
     docs: List[str] = []
@@ -1204,6 +1328,75 @@ def build_records_for_moodle_text(courseid: int, item: Dict) -> Tuple[List[str],
         "cmid": int(cmid) if cmid is not None else -1,
         "sectionnum": int(sectionnum) if sectionnum is not None else -1,
     })
+    
+    # -----------------------------------------
+    # TABLE ROW CHUNKS
+    # -----------------------------------------
+    tables = extract_html_tables(raw_html)
+
+    for ti, table in enumerate(tables):
+        table_name = table.get("table_name", f"Table {ti+1}")
+        for row in table.get("rows", []):
+            row_index = row.get("row_index", 0)
+            row_text = build_table_row_text(table_name, row)
+
+            if len(row_text) < MIN_MOODLE_TEXT_CHARS:
+                continue
+
+            rec_id = f"{base_id}:table:{ti}:row:{row_index}"
+            ids.append(rec_id)
+            docs.append(row_text)
+            metas.append({
+                "courseid": int(courseid),
+                "source": title,
+                "page": -1,
+                "chunk_index": int(row_index),
+                "contextlevel": contextlevel,
+                "section_type": infer_section_type(row_text),
+                "title_hint": title,
+                "contenthash": "",
+                "chunk_type": "table_row",
+                "doc_kind": "moodle_text",
+                "article_number": "",
+                "article_title": "",
+                "chapter_title": "",
+                "source_type": source_type,
+                "module_name": module_name,
+                "cmid": int(cmid) if cmid is not None else -1,
+                "sectionnum": int(sectionnum) if sectionnum is not None else -1,
+                "table_name": table_name,
+                "row_index": int(row_index),
+            })
+            
+    # -----------------------------------------
+    # TABLE LEGEND CHUNKS
+    # -----------------------------------------
+    legends = extract_schedule_legend_chunks(cleaned_text)
+    for li, legend in enumerate(legends):
+        rec_id = f"{base_id}:legend:{li}"
+        ids.append(rec_id)
+        docs.append(legend)
+        metas.append({
+            "courseid": int(courseid),
+            "source": title,
+            "page": -1,
+            "chunk_index": int(10000 + li),
+            "contextlevel": contextlevel,
+            "section_type": infer_section_type(legend),
+            "title_hint": title,
+            "contenthash": "",
+            "chunk_type": "table_legend",
+            "doc_kind": "moodle_text",
+            "article_number": "",
+            "article_title": "",
+            "chapter_title": "",
+            "source_type": source_type,
+            "module_name": module_name,
+            "cmid": int(cmid) if cmid is not None else -1,
+            "sectionnum": int(sectionnum) if sectionnum is not None else -1,
+            "table_name": "legend",
+            "row_index": -1,
+        })
 
     for chunk_index, block in enumerate(blocks):
         rec_id = f"{base_id}:c{chunk_index}"
