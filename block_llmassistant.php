@@ -65,7 +65,7 @@ class block_llmassistant extends block_base {
 
         $apiurl = (new moodle_url('/blocks/llmassistant/rag_endpoint.php'))->out(false);
         $historyurl = (new moodle_url('/blocks/llmassistant/history_endpoint.php'))->out(false);
-        $sourcebaseurl = (new moodle_url('/blocks/llmassistant/source_file.php/'))->out(false);
+        $sourcebaseurl = (new moodle_url('/blocks/llmassistant/source_file.php'))->out(false);
 
         $iscourse = (
             !empty($COURSE->id) &&

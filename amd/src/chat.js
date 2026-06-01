@@ -123,23 +123,71 @@ define(['core/log'], function(Log) {
         }
 
         /**
-         * Build the link of the source.
+         * Build the correct link for a source.
          *
-         * @param {string} label Source visible label.
+         * Supports:
+         * - PDFs
+         * - Moodle-native sources (assign, page, label, forum, url, etc.)
+         *
+         * @param {Object|string} sourceInfo Source object from `sources_structured`,
+         *                                   or fallback string for old messages.
          * @returns {string} Source URL.
          */
-        function buildSourceHref(label) {
-            const m = label.match(/^(.*?)(?:\s+\(p\.\s*([0-9]+)(?:-[0-9]+)?(?:,\s*.*)?\))?$/i);
-            const filename = m ? m[1].trim() : label.trim();
-            const page = (m && m[2]) ? parseInt(m[2], 10) : null;
+        function buildSourceHref(sourceInfo) {
+            // --------------------------------------------------
+            // Fallback for legacy string-only sources
+            // --------------------------------------------------
+            if (typeof sourceInfo === "string") {
+                const label = sourceInfo.trim();
+                const m = label.match(/^(.*?)(?:\s+\(p\.\s*([0-9]+)(?:-[0-9]+)?(?:,\s*.*)?\))?$/i);
+                const filename = m ? m[1].trim() : label;
+                const page = (m && m[2]) ? parseInt(m[2], 10) : null;
 
-            let href = sourceBaseUrl
-                + encodeURIComponent(filename)
-                + "?courseid=" + encodeURIComponent(courseId)
-                + "&source=" + encodeURIComponent(filename);
+                const params = new URLSearchParams({
+                    courseid: courseId,
+                    source: filename
+                });
 
-            if (page) {
-                href += "#page=" + page;
+                let href = sourceBaseUrl + "?" + params.toString();
+
+                if (page && page > 0) {
+                    href += "#page=" + page;
+                }
+
+                return href;
+            }
+
+            // --------------------------------------------------
+            // Structured sources
+            // --------------------------------------------------
+            const src = sourceInfo || {};
+            const source = (src.source || src.label || "").trim();
+            const srcCourseId = (src.courseid !== undefined && src.courseid !== null && src.courseid !== -1)
+                ? src.courseid
+                : courseId;
+
+            const params = new URLSearchParams({
+                courseid: srcCourseId,
+                source: source,
+                doc_kind: src.doc_kind || "",
+                source_type: src.source_type || "",
+                module_name: src.module_name || "",
+                cmid: (src.cmid !== undefined && src.cmid !== null) ? src.cmid : "",
+                sectionnum: (src.sectionnum !== undefined && src.sectionnum !== null) ? src.sectionnum : "",
+                page: (src.page !== undefined && src.page !== null) ? src.page : ""
+            });
+
+            let href = sourceBaseUrl + "?" + params.toString();
+
+            // Only append #page for real PDF pages
+            if (
+                src.doc_kind &&
+                src.doc_kind !== "moodle_text" &&
+                src.page !== undefined &&
+                src.page !== null &&
+                parseInt(src.page, 10) > 0
+            ) {
+                href += "#page=" + parseInt(src.page, 10);
             }
 
             return href;
@@ -149,9 +197,10 @@ define(['core/log'], function(Log) {
          * Add a message from the assistant with sources.
          *
          * @param {string} answer Assistant's answer.
-         * @param {Array} sources List of sources.
+         * @param {Array} sources List of plain-text sources.
+         * @param {Array} sourcesStructured List of structured source objects used to build correct links.
          */
-        function addAssistantMessage(answer, sources) {
+        function addAssistantMessage(answer, sources, sourcesStructured) {
             const wrap = document.createElement("div");
             wrap.className = "llm-msg-bot";
 
@@ -164,54 +213,81 @@ define(['core/log'], function(Log) {
 
             wrap.appendChild(text);
 
-            if (Array.isArray(sources) && sources.length) {
+            const structured = Array.isArray(sourcesStructured) ? sourcesStructured : [];
+            const plain = Array.isArray(sources) ? sources : [];
+
+            const hasAnySources = structured.length || plain.length;
+
+            if (hasAnySources) {
                 const src = document.createElement("div");
                 src.className = "llm-sources";
 
-                const formatted = [];
+                const title = document.createElement("div");
+                title.style.marginTop = "8px";
+                title.style.fontWeight = "600";
+                title.textContent = labelSources;
+                src.appendChild(title);
+
+                const chips = document.createElement("div");
                 const seen = new Set();
 
-                sources.forEach(function(s) {
-                    let label = "";
+                // Prefer structured sources when available
+                if (structured.length) {
+                    structured.forEach(function(s) {
+                        const label = (s && typeof s === "object" && s.label)
+                            ? String(s.label).trim()
+                            : "";
 
-                    if (typeof s === "string") {
-                        label = s.trim();
-                    } else if (s && typeof s === "object") {
-                        const source = (typeof s.source === "string") ? s.source.trim() : "Unknown source";
-                        const page = (s.page !== undefined && s.page !== null) ? " (p. " + s.page + ")" : "";
-                        label = source + page;
-                    }
+                        if (!label || seen.has(label)) {
+                            return;
+                        }
 
-                    if (label && !seen.has(label)) {
                         seen.add(label);
-                        formatted.push(label);
-                    }
-                });
 
-                if (formatted.length) {
-                    const title = document.createElement("div");
-                    title.style.marginTop = "8px";
-                    title.style.fontWeight = "600";
-                    title.textContent = labelSources;
-                    src.appendChild(title);
-
-                    const chips = document.createElement("div");
-
-                    formatted.forEach(function(label) {
                         const chip = document.createElement("a");
                         chip.className = "llm-chip llm-chip--link";
                         chip.textContent = label;
                         chip.target = "_blank";
                         chip.rel = "noopener noreferrer";
-                        chip.href = buildSourceHref(label);
+                        chip.href = buildSourceHref(s);
                         chips.appendChild(chip);
                     });
+                } else {
+                    // Fallback for older history/messages with plain string sources only
+                    plain.forEach(function(s) {
+                        let label = "";
 
+                        if (typeof s === "string") {
+                            label = s.trim();
+                        } else if (s && typeof s === "object") {
+                            const source = (typeof s.source === "string") ? s.source.trim() : "Unknown source";
+                            const page = (s.page !== undefined && s.page !== null && parseInt(s.page, 10) > 0)
+                                ? " (p. " + s.page + ")"
+                                : "";
+                            label = source + page;
+                        }
+
+                        if (!label || seen.has(label)) {
+                            return;
+                        }
+
+                        seen.add(label);
+
+                        const chip = document.createElement("a");
+                        chip.className = "llm-chip llm-chip--link";
+                        chip.textContent = label;
+                        chip.target = "_blank";
+                        chip.rel = "noopener noreferrer";
+                        chip.href = buildSourceHref(s);
+                        chips.appendChild(chip);
+                    });
+                }
+
+                if (chips.children.length) {
                     src.appendChild(chips);
                     wrap.appendChild(src);
                 }
             }
-
             chatWindow.appendChild(wrap);
             scrollToBottom();
         }
@@ -255,7 +331,11 @@ define(['core/log'], function(Log) {
 
                 for (const m of messages) {
                     if (m.role === "assistant") {
-                        addAssistantMessage(m.message, m.sources || []);
+                        addAssistantMessage(
+                            m.message,
+                            m.sources || [],
+                            m.sources_structured || []
+                        );
                     } else {
                         addMessage(m.message, "user");
                     }
@@ -389,7 +469,11 @@ define(['core/log'], function(Log) {
                         ? data.answer.trim()
                         : "No answer returned.";
 
-                addAssistantMessage(answer, Array.isArray(data.sources) ? data.sources : []);
+                addAssistantMessage(
+                    answer,
+                    Array.isArray(data.sources) ? data.sources : [],
+                    Array.isArray(data.sources_structured) ? data.sources_structured : []
+                );
             } catch (err) {
                 if (currentThinkingEl) {
                     currentThinkingEl.remove();

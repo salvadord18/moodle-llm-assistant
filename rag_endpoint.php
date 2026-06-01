@@ -555,17 +555,17 @@ function llmassistant_save_assistant_message(
     int $userid,
     int $courseid,
     string $answer,
-    array $sources = []
+    array $sources = [],
+    array $sourcesstructured = []
 ): void {
     try {
-        $sourcesjson = json_encode($sources, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
-
         \block_llmassistant\local\history_manager::save_message(
             $userid,
             $courseid,
             'assistant',
             $answer,
-            $sourcesjson
+            $sources,
+            $sourcesstructured
         );
     } catch (Throwable $e) {
         // Do not break the endpoint if history persistence fails.
@@ -724,12 +724,14 @@ try {
     }
 
     $sources = $data['sources'] ?? [];
-
+    $sourcesstructured = $data['sources_structured'] ?? [];
+   
     llmassistant_save_assistant_message(
         $userid,
         $courseid,
         $answer,
-        is_array($sources) ? $sources : []
+        is_array($sources) ? $sources : [],
+        is_array($sourcesstructured) ? $sourcesstructured : []
     );
 
     if (ob_get_length()) {
@@ -739,8 +741,9 @@ try {
     $totalms = round((microtime(true) - $t0total) * 1000, 1);
 
     $out = [
-        'answer'  => $answer,
-        'sources' => $sources,
+        'answer' => $answer,
+        'sources' => is_array($sources) ? $sources : [],
+        'sources_structured' => is_array($sourcesstructured) ? $sourcesstructured : [],
     ];
 
     // During development, forward backend debug info if present.
@@ -812,6 +815,7 @@ try {
     $out = [
         'answer'  => $answer,
         'sources' => [],
+        'sources_structured' => [],
         'debug'   => get_class($e) . ': ' . $e->getMessage(),
     ];
 

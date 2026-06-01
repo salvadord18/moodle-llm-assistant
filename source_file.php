@@ -1,27 +1,25 @@
 <?php
 require_once(__DIR__ . '/../../config.php');
 
-/**
- * Start buffering early so that any accidental output
- * does not break send_stored_file() headers.
- */
 ob_start();
 
-$courseid = required_param('courseid', PARAM_INT);
-$source = optional_param('source', '', PARAM_RAW_TRIMMED);
+$courseid    = required_param('courseid', PARAM_INT);
+$source      = optional_param('source', '', PARAM_RAW_TRIMMED);
+$doc_kind    = optional_param('doc_kind', '', PARAM_RAW_TRIMMED);
+$source_type = optional_param('source_type', '', PARAM_RAW_TRIMMED);
+$module_name = optional_param('module_name', '', PARAM_RAW_TRIMMED);
+$cmid        = optional_param('cmid', 0, PARAM_INT);
+$sectionnum  = optional_param('sectionnum', -1, PARAM_INT);
+$page        = optional_param('page', -1, PARAM_INT);
 
-/**
- * Fallback: if source was not passed correctly as query param,
- * try PATH_INFO and decode it.
- */
 if ($source === '' && !empty($_SERVER['PATH_INFO'])) {
     $source = rawurldecode(trim((string)$_SERVER['PATH_INFO'], '/'));
 }
 
-/**
- * Decode defensively in case source arrives URL-encoded.
- */
 $source = rawurldecode(trim($source));
+$doc_kind = trim($doc_kind);
+$source_type = trim($source_type);
+$module_name = trim($module_name);
 
 if ($source === '') {
     throw new moodle_exception('missingparam', 'error', '', 'source');
@@ -64,15 +62,55 @@ function llmassistant_resolve_global_source_course_id(): int {
 
 $sourcecourseid = ($courseid === 0) ? llmassistant_resolve_global_source_course_id() : $courseid;
 
-// If this is a normal course source, require course access.
 if ($sourcecourseid > 0 && $courseid !== 0) {
     $course = get_course($sourcecourseid);
     require_login($course);
 }
 
 /**
- * First try: strict lookup for normal Moodle resource PDFs.
+ * ---------------------------------------------------------
+ * 1) Moodle-native sources
+ * ---------------------------------------------------------
  */
+if ($doc_kind === 'moodle_text') {
+    // If we have a Moodle module id, redirect directly to the module view.
+    if ($cmid > 0 && $module_name !== '') {
+        $allowedmods = [
+            'assign', 'quiz', 'forum', 'page',
+            'url', 'folder', 'resource', 'book'
+        ];
+
+        if (in_array($module_name, $allowedmods, true)) {
+            while (ob_get_level()) {
+                ob_end_clean();
+            }
+            redirect(new moodle_url("/mod/{$module_name}/view.php", ['id' => $cmid]));
+        }
+
+        // Label normally has no meaningful standalone page; fall through to course section.
+    }
+
+    // For labels / section summaries / course summaries, go to course page.
+    $params = ['id' => $sourcecourseid];
+    $url = new moodle_url('/course/view.php', $params);
+
+    // Try section anchor if available
+    if ($sectionnum >= 0) {
+        $url->set_anchor('section-' . $sectionnum);
+    }
+
+    while (ob_get_level()) {
+        ob_end_clean();
+    }
+    redirect($url);
+}
+
+/**
+ * ---------------------------------------------------------
+ * 2) PDF sources
+ * ---------------------------------------------------------
+ */
+
 $sqlstrict = "
     SELECT
         f.id,
@@ -100,9 +138,6 @@ $sqlstrict = "
     ORDER BY f.timemodified DESC, f.id DESC
 ";
 
-/**
- * Fallback: broader lookup if the strict query finds nothing.
- */
 $sqlfallback = "
     SELECT
         f.id,
@@ -165,15 +200,10 @@ if (!$file) {
     throw new moodle_exception('filenotfound', 'error');
 }
 
-/**
- * Clear any accidental output before sending the file,
- * otherwise Moodle/PHP may complain about headers already sent.
- */
 while (ob_get_level()) {
     ob_end_clean();
 }
 
-// Serve inline so the browser PDF viewer can use #page=N.
 send_stored_file($file, 0, 0, false, [
     'cacheability' => 'public',
 ]);

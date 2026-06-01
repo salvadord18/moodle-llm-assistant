@@ -6,7 +6,6 @@
  * ==============================================
  */
 
-
 define('AJAX_SCRIPT', true);
 
 require_once(__DIR__ . '/../../config.php');
@@ -32,7 +31,8 @@ try {
                 'role' => $m->role,
                 'message' => $m->message,
                 'timecreated' => $m->timecreated,
-                'sources' => $m->sourcesjson ? json_decode($m->sourcesjson, true) : [],
+                'sources' => !empty($m->sources) ? $m->sources : [],
+                'sources_structured' => !empty($m->sources_structured) ? $m->sources_structured : [],
             ];
         }
 

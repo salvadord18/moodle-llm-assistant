@@ -506,6 +506,12 @@ def pack_context(ranked_items, query_text: str, mode: str = "generic"):
             "page": page,
             "chunk_index": chunk_index,
             "content": d2.lower(),
+            "doc_kind": (meta or {}).get("doc_kind", ""),
+            "source_type": (meta or {}).get("source_type", ""),
+            "module_name": (meta or {}).get("module_name", ""),
+            "cmid": (meta or {}).get("cmid", -1),
+            "sectionnum": (meta or {}).get("sectionnum", -1),
+            "courseid": (meta or {}).get("courseid", -1),
         })
 
         total += len(block)
@@ -560,6 +566,47 @@ def format_sources(source_map):
             output.append(src)
 
     return output
+
+def build_structured_sources(source_items: list[dict]):
+    """
+    Convert source items into structured objects that the frontend
+    can use to build correct links for PDFs and Moodle-native content.
+    """
+    out = []
+    seen = set()
+
+    for item in source_items:
+        src = item.get("source", "")
+        page = item.get("page")
+        doc_kind = item.get("doc_kind", "")
+        source_type = item.get("source_type", "")
+        module_name = item.get("module_name", "")
+        cmid = item.get("cmid", -1)
+        sectionnum = item.get("sectionnum", -1)
+        courseid = item.get("courseid", -1)
+
+        key = (src, page, doc_kind, module_name, cmid, sectionnum, courseid)
+        if key in seen:
+            continue
+        seen.add(key)
+
+        label = src
+        if page is not None and safe_int(page) not in (None, -1):
+            label = f"{src} ({format_pages([page])})"
+
+        out.append({
+            "label": label,
+            "source": src,
+            "page": page,
+            "doc_kind": doc_kind,
+            "source_type": source_type,
+            "module_name": module_name,
+            "cmid": cmid,
+            "sectionnum": sectionnum,
+            "courseid": courseid,
+        })
+
+    return out
 
 USED_SOURCES_RE = re.compile(r"(?im)^USED[\s_-]?SOURCES:\s*(.+?)\s*$")
 
@@ -1847,6 +1894,9 @@ ANSWER:
 
     used_sources_from_model = bool(used_source_ids)
 
+    final_sources_text = []
+    final_sources_structured = []
+
     if used_source_ids:
         selected_items = [item for item in used_sources if item["id"] in used_source_ids]
 
@@ -1859,7 +1909,8 @@ ANSWER:
             if regulatory_selected:
                 selected_items = regulatory_selected
 
-        final_sources = format_sources(selected_items)
+        final_sources_text = format_sources(selected_items)
+        final_sources_structured = build_structured_sources(selected_items)
 
     else:
         if clean_answer.strip() != no_info_msg:
@@ -1876,16 +1927,21 @@ ANSWER:
                     fallback_items = filtered_items
 
             fallback_items = fallback_items[:3]
-            final_sources = format_sources(fallback_items)
             used_source_ids = [item["id"] for item in fallback_items]
+
+            final_sources_text = format_sources(fallback_items)
+            final_sources_structured = build_structured_sources(fallback_items)
         else:
-            final_sources = []
+            final_sources_text = []
+            final_sources_structured = []
             
     total_ms = round((time.perf_counter() - t0_total) * 1000, 1)
 
+
     resp = {
         "answer": clean_answer,
-        "sources": final_sources
+        "sources": final_sources_text,
+        "sources_structured": final_sources_structured
     }
     
     if DEBUG:
@@ -1902,7 +1958,8 @@ ANSWER:
             "effective_priority_sources": effective_priority_sources,
             "top_sources": used_sources,
             "used_source_ids": used_source_ids,
-            "final_sources": final_sources,
+            "final_sources_text": final_sources_text,
+            "final_sources_structured": final_sources_structured,
             "source_resolution_mode": "model_used_sources" if used_sources_from_model else "fallback_overlap",
             "timing_ms": {
                 "retrieval": retrieval_ms,
