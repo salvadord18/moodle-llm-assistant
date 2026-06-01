@@ -1,13 +1,20 @@
 """
-Moodle RAG Ingestion — Generic, course-aware ingestion for Moodle PDFs
----------------------------------------------------------------------
+Moodle RAG Ingestion — Generic, course-aware ingestion for Moodle PDFs and native Moodle text
+---------------------------------------------------------------------------------------------
 
 What this version improves:
 - No assumptions about PDF file names (e.g. no Lecture1.pdf bias)
 - Per-course Chroma collections: course_docs_<courseid>
 - Extracts PDFs from course context (50) and module context (70)
-- Indexes page-aware chunks with rich metadata:
+- Also ingests native Moodle text:
+    * course summary
+    * section summaries
+    * labels
+    * pages
+    * book chapters
+- Indexes page-aware and structured chunks with rich metadata:
     * source
+    * source_type
     * page
     * chunk_index
     * courseid
@@ -15,6 +22,9 @@ What this version improves:
     * section_type
     * title_hint
     * contenthash
+    * module_name
+    * cmid
+    * sectionnum
 - Chunking is page-first and structure-aware instead of only fixed-size slicing
 - Can ingest one course or all courses
 - Can rebuild collections cleanly with RESET_COLLECTION=true
@@ -23,7 +33,12 @@ What this version improves:
 import os
 import re
 from typing import Dict, List, Tuple
+from html import unescape
 
+try:
+    from bs4 import BeautifulSoup
+except ImportError:
+    BeautifulSoup = None
 import fitz
 import psycopg2
 from chromadb import PersistentClient
@@ -97,6 +112,132 @@ def normalize(text: str) -> str:
         if line:
             cleaned.append(line)
     return "\n".join(cleaned)
+
+def strip_html_fallback(html: str) -> str:
+    """Very simple HTML stripping fallback if BeautifulSoup is unavailable."""
+    if not html:
+        return ""
+    text = re.sub(r"<br\s*/?>", "\n", html, flags=re.I)
+    text = re.sub(r"</p\s*>", "\n", text, flags=re.I)
+    text = re.sub(r"</li\s*>", "\n", text, flags=re.I)
+    text = re.sub(r"<li\s*>", "- ", text, flags=re.I)
+    text = re.sub(r"<[^>]+>", " ", text)
+    text = unescape(text)
+    return normalize(text)
+
+
+def html_to_clean_text(html: str) -> str:
+    """
+    Convert Moodle HTML content into clean plain text while preserving:
+    - headings
+    - lists
+    - table rows/cells
+    - paragraph structure
+    """
+    if not html:
+        return ""
+
+    html = unescape(html)
+
+    if BeautifulSoup is None:
+        return strip_html_fallback(html)
+
+    soup = BeautifulSoup(html, "html.parser")
+
+    # Line breaks
+    for tag in soup.find_all(["br"]):
+        tag.replace_with("\n")
+
+    # Paragraph/block structure
+    for tag in soup.find_all(["p", "div", "section"]):
+        tag.insert_after("\n")
+
+    # Lists
+    for tag in soup.find_all(["li"]):
+        txt = tag.get_text(" ", strip=True)
+        tag.clear()
+        tag.append(f"- {txt}")
+        tag.insert_after("\n")
+
+    # Headings
+    for tag in soup.find_all(["h1", "h2", "h3", "h4", "h5", "h6"]):
+        tag.insert_before("\n")
+        tag.insert_after("\n")
+
+    # Tables: preserve row/cell structure better
+    for tag in soup.find_all(["th", "td"]):
+        tag.insert_after(" | ")
+
+    for tag in soup.find_all(["tr"]):
+        tag.insert_after("\n")
+
+    text = soup.get_text(separator=" ")
+    text = text.replace("\xa0", " ")
+    text = re.sub(r"[ \t]+", " ", text)
+    text = re.sub(r" *\| *", " | ", text)
+    text = re.sub(r"\n\s*\n+", "\n\n", text)
+    return normalize(text)
+    """
+    Convert Moodle HTML content into clean plain text while preserving basic structure.
+    """
+    if not html:
+        return ""
+
+    html = unescape(html)
+
+    if BeautifulSoup is None:
+        return strip_html_fallback(html)
+
+    soup = BeautifulSoup(html, "html.parser")
+
+    # Convert structural tags into explicit separators
+    for tag in soup.find_all(["br"]):
+        tag.replace_with("\n")
+
+    for tag in soup.find_all(["p", "div", "section"]):
+        tag.insert_after("\n")
+
+    for tag in soup.find_all(["li"]):
+        if tag.string:
+            tag.string.replace_with(f"- {tag.get_text(strip=True)}")
+        else:
+            tag.insert(0, "- ")
+        tag.insert_after("\n")
+
+    for tag in soup.find_all(["h1", "h2", "h3", "h4", "h5", "h6"]):
+        tag.insert_before("\n")
+        tag.insert_after("\n")
+
+    for tag in soup.find_all(["tr"]):
+        tag.insert_after("\n")
+
+    text = soup.get_text(separator=" ")
+    text = text.replace("\xa0", " ")
+    text = re.sub(r"[ \t]+", " ", text)
+    text = re.sub(r"\n\s*\n+", "\n\n", text)
+    return normalize(text)
+
+def format_unix_ts(ts) -> str:
+    """
+    Convert Moodle Unix timestamp to a readable UTC string.
+    Returns '' if empty/invalid.
+    """
+    try:
+        ts = int(ts or 0)
+        if ts <= 0:
+            return ""
+        from datetime import datetime, timezone
+        return datetime.fromtimestamp(ts, tz=timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+    except Exception:
+        return ""
+
+
+def join_text_parts(parts: List[str]) -> str:
+    """
+    Join text pieces while dropping empties.
+    """
+    return "\n".join([p.strip() for p in parts if p and str(p).strip()])
+
 
 def remove_running_headers_footers(text: str) -> str:
     lines = []
@@ -314,30 +455,63 @@ def db_connect():
     return psycopg2.connect(**DB)
 
 
-def get_all_course_ids_with_pdfs() -> List[int]:
+def get_all_course_ids_with_content() -> List[int]:
+    """
+    Return all course IDs that have either:
+    - PDFs
+    - Moodle-native text content (course summary, section summary, modules)
+    """
     conn = db_connect()
     cur = conn.cursor()
+
     sql = f"""
-        SELECT DISTINCT
-            CASE
-                WHEN c.contextlevel = %s THEN c.instanceid
-                WHEN c.contextlevel = %s THEN cm.course
-            END AS courseid
-        FROM {DB_PREFIX}files f
-        JOIN {DB_PREFIX}context c
-          ON f.contextid = c.id
-        LEFT JOIN {DB_PREFIX}course_modules cm
-          ON c.contextlevel = %s
-         AND c.instanceid = cm.id
-        WHERE f.filename LIKE '%%.pdf'
-          AND f.filesize > 0
-          AND f.contenthash IS NOT NULL
-          AND (
-                c.contextlevel = %s
-                OR (c.contextlevel = %s AND cm.course IS NOT NULL)
-              )
+        SELECT DISTINCT courseid
+        FROM (
+            -- Courses with PDFs
+            SELECT
+                CASE
+                    WHEN c.contextlevel = %s THEN c.instanceid
+                    WHEN c.contextlevel = %s THEN cm.course
+                END AS courseid
+            FROM {DB_PREFIX}files f
+            JOIN {DB_PREFIX}context c
+              ON f.contextid = c.id
+            LEFT JOIN {DB_PREFIX}course_modules cm
+              ON c.contextlevel = %s
+             AND c.instanceid = cm.id
+            WHERE f.filename LIKE '%%.pdf'
+              AND f.filesize > 0
+              AND f.contenthash IS NOT NULL
+              AND (
+                    c.contextlevel = %s
+                    OR (c.contextlevel = %s AND cm.course IS NOT NULL)
+                  )
+
+            UNION
+
+            -- Courses with course summary
+            SELECT c.id AS courseid
+            FROM {DB_PREFIX}course c
+            WHERE COALESCE(c.summary, '') <> ''
+
+            UNION
+
+            -- Courses with section names/summaries
+            SELECT cs.course AS courseid
+            FROM {DB_PREFIX}course_sections cs
+            WHERE COALESCE(cs.name, '') <> ''
+               OR COALESCE(cs.summary, '') <> ''
+
+            UNION
+
+            -- Courses with modules
+            SELECT cm.course AS courseid
+            FROM {DB_PREFIX}course_modules cm
+        ) q
+        WHERE courseid IS NOT NULL
         ORDER BY courseid
     """
+
     cur.execute(sql, (
         COURSE_CONTEXTLEVEL,
         MODULE_CONTEXTLEVEL,
@@ -384,6 +558,507 @@ def get_course_pdfs(courseid: int) -> List[Tuple[str, str, int]]:
     cur.close()
     conn.close()
     return rows
+
+
+def get_course_moodle_text_items(courseid: int) -> List[Dict]:
+    """
+    Return Moodle-native text items for a course, covering:
+    - course summary
+    - section names + section summaries
+    - labels
+    - pages
+    - book chapters
+    - assignments (with due/open/cutoff dates)
+    - quizzes (with open/close dates)
+    - forums
+    - URLs
+    - folders
+    - resources
+    """
+    conn = db_connect()
+    cur = conn.cursor()
+    items: List[Dict] = []
+
+    # --------------------------------------------------
+    # 1) Course summary
+    # --------------------------------------------------
+    sql_course = f"""
+        SELECT id, fullname, shortname, summary
+        FROM {DB_PREFIX}course
+        WHERE id = %s
+    """
+    cur.execute(sql_course, (courseid,))
+    row = cur.fetchone()
+    if row:
+        cid, fullname, shortname, summary = row
+        if summary and str(summary).strip():
+            items.append({
+                "item_type": "course_summary",
+                "item_id": f"course_summary:{cid}",
+                "title": f"Course summary - {fullname}",
+                "html": summary,
+                "courseid": cid,
+                "contextlevel": COURSE_CONTEXTLEVEL,
+                "cmid": None,
+                "sectionnum": None,
+                "module_name": "course",
+            })
+
+    # --------------------------------------------------
+    # 2) Section names + section summaries
+    # --------------------------------------------------
+    sql_sections = f"""
+        SELECT id, course, section, name, summary
+        FROM {DB_PREFIX}course_sections
+        WHERE course = %s
+        ORDER BY section
+    """
+    cur.execute(sql_sections, (courseid,))
+    for section_id, cid, sectionnum, name, summary in cur.fetchall():
+        title = name.strip() if name and str(name).strip() else f"Section {sectionnum}"
+        html = join_text_parts([
+            f"<h2>{title}</h2>",
+            summary or ""
+        ])
+        if html.strip():
+            items.append({
+                "item_type": "section_summary",
+                "item_id": f"section_summary:{section_id}",
+                "title": title,
+                "html": html,
+                "courseid": cid,
+                "contextlevel": COURSE_CONTEXTLEVEL,
+                "cmid": None,
+                "sectionnum": sectionnum,
+                "module_name": "course_section",
+            })
+
+    # --------------------------------------------------
+    # 3) Labels
+    # --------------------------------------------------
+    sql_labels = f"""
+        SELECT
+            cm.id AS cmid,
+            cm.course,
+            cs.section AS sectionnum,
+            cs.name AS sectionname,
+            l.intro
+        FROM {DB_PREFIX}course_modules cm
+        JOIN {DB_PREFIX}modules m
+          ON cm.module = m.id
+        JOIN {DB_PREFIX}label l
+          ON cm.instance = l.id
+        LEFT JOIN {DB_PREFIX}course_sections cs
+          ON cm.section = cs.id
+        WHERE m.name = 'label'
+          AND cm.course = %s
+        ORDER BY cm.id
+    """
+    cur.execute(sql_labels, (courseid,))
+    for cmid, cid, sectionnum, sectionname, intro in cur.fetchall():
+        if intro and str(intro).strip():
+            html = join_text_parts([
+                f"<h2>{sectionname}</h2>" if sectionname else "",
+                intro
+            ])
+            items.append({
+                "item_type": "label",
+                "item_id": f"label:{cmid}",
+                "title": f"Label {cmid}" if not sectionname else f"{sectionname} - Label {cmid}",
+                "html": html,
+                "courseid": cid,
+                "contextlevel": MODULE_CONTEXTLEVEL,
+                "cmid": cmid,
+                "sectionnum": sectionnum,
+                "module_name": "label",
+            })
+
+    # --------------------------------------------------
+    # 4) Pages
+    # --------------------------------------------------
+    sql_pages = f"""
+        SELECT
+            cm.id AS cmid,
+            cm.course,
+            cs.section AS sectionnum,
+            cs.name AS sectionname,
+            p.name,
+            p.intro,
+            p.content
+        FROM {DB_PREFIX}course_modules cm
+        JOIN {DB_PREFIX}modules m
+          ON cm.module = m.id
+        JOIN {DB_PREFIX}page p
+          ON cm.instance = p.id
+        LEFT JOIN {DB_PREFIX}course_sections cs
+          ON cm.section = cs.id
+        WHERE m.name = 'page'
+          AND cm.course = %s
+        ORDER BY cm.id
+    """
+    cur.execute(sql_pages, (courseid,))
+    for cmid, cid, sectionnum, sectionname, name, intro, content in cur.fetchall():
+        html = join_text_parts([
+            f"<h2>{sectionname}</h2>" if sectionname else "",
+            f"<h3>{name}</h3>" if name else "",
+            intro or "",
+            content or "",
+        ])
+        if html.strip():
+            items.append({
+                "item_type": "page",
+                "item_id": f"page:{cmid}",
+                "title": name.strip() if name and str(name).strip() else f"Page {cmid}",
+                "html": html,
+                "courseid": cid,
+                "contextlevel": MODULE_CONTEXTLEVEL,
+                "cmid": cmid,
+                "sectionnum": sectionnum,
+                "module_name": "page",
+            })
+
+    # --------------------------------------------------
+    # 5) Book chapters
+    # --------------------------------------------------
+    sql_books = f"""
+        SELECT
+            cm.id AS cmid,
+            cm.course,
+            cs.section AS sectionnum,
+            cs.name AS sectionname,
+            b.name AS book_name,
+            bc.id AS chapterid,
+            bc.title,
+            bc.content
+        FROM {DB_PREFIX}course_modules cm
+        JOIN {DB_PREFIX}modules m
+          ON cm.module = m.id
+        JOIN {DB_PREFIX}book b
+          ON cm.instance = b.id
+        JOIN {DB_PREFIX}book_chapters bc
+          ON bc.bookid = b.id
+        LEFT JOIN {DB_PREFIX}course_sections cs
+          ON cm.section = cs.id
+        WHERE m.name = 'book'
+          AND cm.course = %s
+        ORDER BY cm.id, bc.pagenum
+    """
+    try:
+        cur.execute(sql_books, (courseid,))
+        for cmid, cid, sectionnum, sectionname, book_name, chapterid, chapter_title, content in cur.fetchall():
+            if content and str(content).strip():
+                html = join_text_parts([
+                    f"<h2>{sectionname}</h2>" if sectionname else "",
+                    f"<h3>{book_name}</h3>" if book_name else "",
+                    f"<h4>{chapter_title}</h4>" if chapter_title else "",
+                    content
+                ])
+                title = f"{book_name} - {chapter_title}" if chapter_title else book_name
+                items.append({
+                    "item_type": "book_chapter",
+                    "item_id": f"book_chapter:{chapterid}",
+                    "title": title,
+                    "html": html,
+                    "courseid": cid,
+                    "contextlevel": MODULE_CONTEXTLEVEL,
+                    "cmid": cmid,
+                    "sectionnum": sectionnum,
+                    "module_name": "book",
+                })
+    except Exception as exc:
+        print(f"[WARN] Could not fetch book chapters for course={courseid}: {exc}")
+
+    # --------------------------------------------------
+    # 6) Assignments (intro + dates)
+    # --------------------------------------------------
+    sql_assign = f"""
+        SELECT
+            cm.id AS cmid,
+            cm.course,
+            cs.section AS sectionnum,
+            cs.name AS sectionname,
+            a.name,
+            a.intro,
+            a.allowsubmissionsfromdate,
+            a.duedate,
+            a.cutoffdate
+        FROM {DB_PREFIX}course_modules cm
+        JOIN {DB_PREFIX}modules m
+          ON cm.module = m.id
+        JOIN {DB_PREFIX}assign a
+          ON cm.instance = a.id
+        LEFT JOIN {DB_PREFIX}course_sections cs
+          ON cm.section = cs.id
+        WHERE m.name = 'assign'
+          AND cm.course = %s
+        ORDER BY cm.id
+    """
+    try:
+        cur.execute(sql_assign, (courseid,))
+        for cmid, cid, sectionnum, sectionname, name, intro, allowsubmissionsfromdate, duedate, cutoffdate in cur.fetchall():
+            date_text = join_text_parts([
+                f"Open from: {format_unix_ts(allowsubmissionsfromdate)}" if format_unix_ts(allowsubmissionsfromdate) else "",
+                f"Due date: {format_unix_ts(duedate)}" if format_unix_ts(duedate) else "",
+                f"Cut-off date: {format_unix_ts(cutoffdate)}" if format_unix_ts(cutoffdate) else "",
+            ])
+            html = join_text_parts([
+                f"<h2>{sectionname}</h2>" if sectionname else "",
+                f"<h3>{name}</h3>" if name else "",
+                intro or "",
+                f"<p>{date_text}</p>" if date_text else ""
+            ])
+            if html.strip():
+                items.append({
+                    "item_type": "assignment",
+                    "item_id": f"assign:{cmid}",
+                    "title": name.strip() if name and str(name).strip() else f"Assignment {cmid}",
+                    "html": html,
+                    "courseid": cid,
+                    "contextlevel": MODULE_CONTEXTLEVEL,
+                    "cmid": cmid,
+                    "sectionnum": sectionnum,
+                    "module_name": "assign",
+                })
+    except Exception as exc:
+        print(f"[WARN] Could not fetch assignments for course={courseid}: {exc}")
+
+    # --------------------------------------------------
+    # 7) Quizzes (intro + dates)
+    # --------------------------------------------------
+    sql_quiz = f"""
+        SELECT
+            cm.id AS cmid,
+            cm.course,
+            cs.section AS sectionnum,
+            cs.name AS sectionname,
+            q.name,
+            q.intro,
+            q.timeopen,
+            q.timeclose
+        FROM {DB_PREFIX}course_modules cm
+        JOIN {DB_PREFIX}modules m
+          ON cm.module = m.id
+        JOIN {DB_PREFIX}quiz q
+          ON cm.instance = q.id
+        LEFT JOIN {DB_PREFIX}course_sections cs
+          ON cm.section = cs.id
+        WHERE m.name = 'quiz'
+          AND cm.course = %s
+        ORDER BY cm.id
+    """
+    try:
+        cur.execute(sql_quiz, (courseid,))
+        for cmid, cid, sectionnum, sectionname, name, intro, timeopen, timeclose in cur.fetchall():
+            date_text = join_text_parts([
+                f"Open date: {format_unix_ts(timeopen)}" if format_unix_ts(timeopen) else "",
+                f"Close date: {format_unix_ts(timeclose)}" if format_unix_ts(timeclose) else "",
+            ])
+            html = join_text_parts([
+                f"<h2>{sectionname}</h2>" if sectionname else "",
+                f"<h3>{name}</h3>" if name else "",
+                intro or "",
+                f"<p>{date_text}</p>" if date_text else ""
+            ])
+            if html.strip():
+                items.append({
+                    "item_type": "quiz",
+                    "item_id": f"quiz:{cmid}",
+                    "title": name.strip() if name and str(name).strip() else f"Quiz {cmid}",
+                    "html": html,
+                    "courseid": cid,
+                    "contextlevel": MODULE_CONTEXTLEVEL,
+                    "cmid": cmid,
+                    "sectionnum": sectionnum,
+                    "module_name": "quiz",
+                })
+    except Exception as exc:
+        print(f"[WARN] Could not fetch quizzes for course={courseid}: {exc}")
+
+    # --------------------------------------------------
+    # 8) Forums
+    # --------------------------------------------------
+    sql_forum = f"""
+        SELECT
+            cm.id AS cmid,
+            cm.course,
+            cs.section AS sectionnum,
+            cs.name AS sectionname,
+            f.name,
+            f.intro
+        FROM {DB_PREFIX}course_modules cm
+        JOIN {DB_PREFIX}modules m
+          ON cm.module = m.id
+        JOIN {DB_PREFIX}forum f
+          ON cm.instance = f.id
+        LEFT JOIN {DB_PREFIX}course_sections cs
+          ON cm.section = cs.id
+        WHERE m.name = 'forum'
+          AND cm.course = %s
+        ORDER BY cm.id
+    """
+    try:
+        cur.execute(sql_forum, (courseid,))
+        for cmid, cid, sectionnum, sectionname, name, intro in cur.fetchall():
+            html = join_text_parts([
+                f"<h2>{sectionname}</h2>" if sectionname else "",
+                f"<h3>{name}</h3>" if name else "",
+                intro or ""
+            ])
+            if html.strip():
+                items.append({
+                    "item_type": "forum",
+                    "item_id": f"forum:{cmid}",
+                    "title": name.strip() if name and str(name).strip() else f"Forum {cmid}",
+                    "html": html,
+                    "courseid": cid,
+                    "contextlevel": MODULE_CONTEXTLEVEL,
+                    "cmid": cmid,
+                    "sectionnum": sectionnum,
+                    "module_name": "forum",
+                })
+    except Exception as exc:
+        print(f"[WARN] Could not fetch forums for course={courseid}: {exc}")
+
+    # --------------------------------------------------
+    # 9) URLs
+    # --------------------------------------------------
+    sql_url = f"""
+        SELECT
+            cm.id AS cmid,
+            cm.course,
+            cs.section AS sectionnum,
+            cs.name AS sectionname,
+            u.name,
+            u.intro,
+            u.externalurl
+        FROM {DB_PREFIX}course_modules cm
+        JOIN {DB_PREFIX}modules m
+          ON cm.module = m.id
+        JOIN {DB_PREFIX}url u
+          ON cm.instance = u.id
+        LEFT JOIN {DB_PREFIX}course_sections cs
+          ON cm.section = cs.id
+        WHERE m.name = 'url'
+          AND cm.course = %s
+        ORDER BY cm.id
+    """
+    try:
+        cur.execute(sql_url, (courseid,))
+        for cmid, cid, sectionnum, sectionname, name, intro, externalurl in cur.fetchall():
+            html = join_text_parts([
+                f"<h2>{sectionname}</h2>" if sectionname else "",
+                f"<h3>{name}</h3>" if name else "",
+                intro or "",
+                f"<p>URL: {externalurl}</p>" if externalurl else ""
+            ])
+            if html.strip():
+                items.append({
+                    "item_type": "url",
+                    "item_id": f"url:{cmid}",
+                    "title": name.strip() if name and str(name).strip() else f"URL {cmid}",
+                    "html": html,
+                    "courseid": cid,
+                    "contextlevel": MODULE_CONTEXTLEVEL,
+                    "cmid": cmid,
+                    "sectionnum": sectionnum,
+                    "module_name": "url",
+                })
+    except Exception as exc:
+        print(f"[WARN] Could not fetch URLs for course={courseid}: {exc}")
+
+    # --------------------------------------------------
+    # 10) Folders
+    # --------------------------------------------------
+    sql_folder = f"""
+        SELECT
+            cm.id AS cmid,
+            cm.course,
+            cs.section AS sectionnum,
+            cs.name AS sectionname,
+            fo.name,
+            fo.intro
+        FROM {DB_PREFIX}course_modules cm
+        JOIN {DB_PREFIX}modules m
+          ON cm.module = m.id
+        JOIN {DB_PREFIX}folder fo
+          ON cm.instance = fo.id
+        LEFT JOIN {DB_PREFIX}course_sections cs
+          ON cm.section = cs.id
+        WHERE m.name = 'folder'
+          AND cm.course = %s
+        ORDER BY cm.id
+    """
+    try:
+        cur.execute(sql_folder, (courseid,))
+        for cmid, cid, sectionnum, sectionname, name, intro in cur.fetchall():
+            html = join_text_parts([
+                f"<h2>{sectionname}</h2>" if sectionname else "",
+                f"<h3>{name}</h3>" if name else "",
+                intro or ""
+            ])
+            if html.strip():
+                items.append({
+                    "item_type": "folder",
+                    "item_id": f"folder:{cmid}",
+                    "title": name.strip() if name and str(name).strip() else f"Folder {cmid}",
+                    "html": html,
+                    "courseid": cid,
+                    "contextlevel": MODULE_CONTEXTLEVEL,
+                    "cmid": cmid,
+                    "sectionnum": sectionnum,
+                    "module_name": "folder",
+                })
+    except Exception as exc:
+        print(f"[WARN] Could not fetch folders for course={courseid}: {exc}")
+
+    # --------------------------------------------------
+    # 11) Resources
+    # --------------------------------------------------
+    sql_resource = f"""
+        SELECT
+            cm.id AS cmid,
+            cm.course,
+            cs.section AS sectionnum,
+            cs.name AS sectionname,
+            r.name,
+            r.intro
+        FROM {DB_PREFIX}course_modules cm
+        JOIN {DB_PREFIX}modules m
+          ON cm.module = m.id
+        JOIN {DB_PREFIX}resource r
+          ON cm.instance = r.id
+        LEFT JOIN {DB_PREFIX}course_sections cs
+          ON cm.section = cs.id
+        WHERE m.name = 'resource'
+          AND cm.course = %s
+        ORDER BY cm.id
+    """
+    try:
+        cur.execute(sql_resource, (courseid,))
+        for cmid, cid, sectionnum, sectionname, name, intro in cur.fetchall():
+            html = join_text_parts([
+                f"<h2>{sectionname}</h2>" if sectionname else "",
+                f"<h3>{name}</h3>" if name else "",
+                intro or ""
+            ])
+            if html.strip():
+                items.append({
+                    "item_type": "resource",
+                    "item_id": f"resource:{cmid}",
+                    "title": name.strip() if name and str(name).strip() else f"Resource {cmid}",
+                    "html": html,
+                    "courseid": cid,
+                    "contextlevel": MODULE_CONTEXTLEVEL,
+                    "cmid": cmid,
+                    "sectionnum": sectionnum,
+                    "module_name": "resource",
+                })
+    except Exception as exc:
+        print(f"[WARN] Could not fetch resources for course={courseid}: {exc}")
+
+    cur.close()
+    conn.close()
+    return items
 
 
 def get_collection_for_course(chroma_client: PersistentClient, courseid: int):
@@ -513,24 +1188,120 @@ def build_records_for_pdf(courseid: int, contenthash: str, filename: str, contex
 
     return ids, docs, metas
 
+def build_records_for_moodle_text(courseid: int, item: Dict) -> Tuple[List[str], List[str], List[Dict]]:
+    """
+    Convert one Moodle-native text item into Chroma upsert records.
+    """
+    raw_html = item.get("html", "") or ""
+    cleaned_text = html_to_clean_text(raw_html)
+
+    if len(cleaned_text) < MIN_TEXT_CHARS:
+        return [], [], []
+
+    blocks = split_into_structured_blocks(cleaned_text)
+
+    if not blocks:
+        return [], [], []
+
+    ids: List[str] = []
+    docs: List[str] = []
+    metas: List[Dict] = []
+
+    base_id = f"moodle:{courseid}:{item['item_type']}:{item['item_id']}"
+    title = item.get("title", "") or item.get("item_type", "Moodle text")
+    source_type = item.get("item_type", "moodle_text")
+    module_name = item.get("module_name", "") or ""
+    cmid = item.get("cmid", None)
+    sectionnum = item.get("sectionnum", None)
+    contextlevel = int(item.get("contextlevel", COURSE_CONTEXTLEVEL))
+
+    for chunk_index, block in enumerate(blocks):
+        rec_id = f"{base_id}:c{chunk_index}"
+        ids.append(rec_id)
+        docs.append(block)
+        metas.append({
+            "courseid": int(courseid),
+            "source": title,
+            "page": -1,
+            "chunk_index": int(chunk_index),
+            "contextlevel": contextlevel,
+            "section_type": infer_section_type(block),
+            "title_hint": title,
+            "contenthash": "",
+            "chunk_type": "block",
+            "doc_kind": "moodle_text",
+            "article_number": "",
+            "article_title": "",
+            "chapter_title": "",
+            "source_type": source_type,
+            "module_name": module_name,
+            "cmid": int(cmid) if cmid is not None else -1,
+            "sectionnum": int(sectionnum) if sectionnum is not None else -1,
+        })
+
+    return ids, docs, metas
+
+def ingest_moodle_text_for_course(collection, courseid: int) -> int:
+    """
+    Ingest Moodle-native text items into the course collection.
+    Returns the number of chunks inserted/upserted.
+    """
+    items = get_course_moodle_text_items(courseid)
+    if not items:
+        print(f"[INFO] No Moodle text items found for course {courseid}")
+        return 0
+
+    total_chunks = 0
+    print(f"[INFO] Ingesting Moodle-native text for course={courseid} ({len(items)} item(s))")
+
+    # small debug summary by type
+    type_counts: Dict[str, int] = {}
+    for it in items:
+        type_counts[it["item_type"]] = type_counts.get(it["item_type"], 0) + 1
+
+    for k, v in sorted(type_counts.items()):
+        print(f"  [INFO] {k}: {v} item(s)")
+
+    for item in items:
+        ids, docs, metas = build_records_for_moodle_text(courseid, item)
+        if not ids:
+            continue
+
+        collection.upsert(ids=ids, documents=docs, metadatas=metas)
+        total_chunks += len(ids)
+        print(f"  [OK] {item['item_type']} - {item['title']}: {len(ids)} chunk(s)")
+
+    return total_chunks
+
 
 def ingest_course(chroma_client: PersistentClient, courseid: int) -> None:
     pdfs = get_course_pdfs(courseid)
-    if not pdfs:
-        print(f"[INFO] No PDFs found for course {courseid}")
-        return
-
     collection_name, collection = get_collection_for_course(chroma_client, courseid)
-    print(f"[INFO] Ingesting course={courseid} into {collection_name} ({len(pdfs)} PDF(s))")
+
+    print(f"[INFO] Ingesting course={courseid} into {collection_name}")
 
     total_chunks = 0
-    for contenthash, filename, contextlevel in pdfs:
-        ids, docs, metas = build_records_for_pdf(courseid, contenthash, filename, contextlevel)
-        if not ids:
-            continue
-        collection.upsert(ids=ids, documents=docs, metadatas=metas)
-        total_chunks += len(ids)
-        print(f"  [OK] {filename}: {len(ids)} chunk(s)")
+
+    # -----------------------------------------
+    # 1) PDF ingestion
+    # -----------------------------------------
+    if pdfs:
+        print(f"[INFO] Found {len(pdfs)} PDF(s) for course={courseid}")
+        for contenthash, filename, contextlevel in pdfs:
+            ids, docs, metas = build_records_for_pdf(courseid, contenthash, filename, contextlevel)
+            if not ids:
+                continue
+            collection.upsert(ids=ids, documents=docs, metadatas=metas)
+            total_chunks += len(ids)
+            print(f"  [OK] PDF {filename}: {len(ids)} chunk(s)")
+    else:
+        print(f"[INFO] No PDFs found for course {courseid}")
+
+    # -----------------------------------------
+    # 2) Moodle-native text ingestion
+    # -----------------------------------------
+    moodle_chunks = ingest_moodle_text_for_course(collection, courseid)
+    total_chunks += moodle_chunks
 
     print(f"[DONE] course={courseid} total_chunks={total_chunks}")
     
@@ -545,7 +1316,7 @@ if __name__ == "__main__":
         course_ids = [TARGET_COURSE_ID]
         print(f"[INFO] Single-course mode: TARGET_COURSE_ID={TARGET_COURSE_ID}")
     else:
-        course_ids = get_all_course_ids_with_pdfs()
+        course_ids = get_all_course_ids_with_content()
         print(f"[INFO] All-courses mode: found {len(course_ids)} course(s) with PDFs")
 
     for cid in course_ids:
