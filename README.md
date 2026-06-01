@@ -353,6 +353,12 @@ uvicorn rag_api:app --host 0.0.0.0 --port 8001
 cd ~/dev/moodle-lab/moodle
 npx grunt amd
 
+
+# FIX CSV FILE WRITING PERMISSIONS
+chown -R www-data:www-data /var/www/moodledata/llmassistant_results
+chmod -R 775 /var/www/moodledata/llmassistant_results
+chmod 664 /var/www/moodledata/llmassistant_results/all_results_summary.csv
+
 # PYTHON SCRIPT TO CREATE CSV
 
 cd moodle-docker/llmassistant_results
