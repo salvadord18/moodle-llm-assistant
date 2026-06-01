@@ -1213,6 +1213,149 @@ def abbreviation_chunk_quality(doc: str, meta: dict, query_text: str) -> float:
 
     return score
 
+def extract_abbreviation_answer(question: str, ranked_items, lang: str = "en"):
+    """
+    Try to extract explicit abbreviation meanings directly from the top ranked chunks.
+
+    Strategy:
+    1) look first for a combined legend line such as:
+       D deliver chapter on Moodle, P Present (5 min each)
+    2) if not found, fall back to single-abbreviation patterns,
+       but reject weak extractions like D -> P
+    """
+    q = question or ""
+
+    # Extract single-letter abbreviations explicitly mentioned in the question.
+    requested = [m.upper() for m in re.findall(r"\b([A-Za-z])\b", q)]
+    requested = [x for x in requested if len(x) == 1]
+    requested = list(dict.fromkeys(requested))
+
+    if not requested:
+        return None, []
+
+    found = {}
+    supporting = []
+
+    for doc, meta, dist, score in ranked_items:
+        text = doc or ""
+        if not text.strip():
+            continue
+
+        lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
+
+        # --------------------------------------------------
+        # 1) STRONG PRIORITY:
+        # Look for a legend line containing multiple abbreviations
+        # Example:
+        # D deliver chapter on Moodle, P Present (5 min each)
+        # --------------------------------------------------
+        for line in lines:
+            # Split by commas/semicolons to parse segments separately
+            parts = re.split(r"[;,]\s*", line)
+
+            local_found = {}
+
+            for part in parts:
+                m = re.match(
+                    r"(?i)^\s*([A-Za-z])\s*(?:=|means|stands for)?\s+(.+?)\s*$",
+                    part
+                )
+                if not m:
+                    continue
+
+                key = m.group(1).upper()
+                val = m.group(2).strip(" ,;:-")
+
+                # Reject nonsense values like "P", "D", "D+P", etc.
+                if not val:
+                    continue
+                if re.fullmatch(r"[A-Za-z]", val):
+                    continue
+                if re.fullmatch(r"[A-Za-z]\+[A-Za-z]", val):
+                    continue
+                if len(val) < 4:
+                    continue
+
+                if key in requested:
+                    local_found[key] = val
+
+            # If the same line explains at least one requested abbreviation,
+            # keep it; if it explains all requested abbreviations, return immediately.
+            if local_found:
+                for k, v in local_found.items():
+                    if k not in found:
+                        found[k] = v
+                if meta not in supporting:
+                    supporting.append(meta)
+
+                if all(k in found for k in requested):
+                    break
+
+        if all(k in found for k in requested):
+            break
+
+        # --------------------------------------------------
+        # 2) FALLBACK:
+        # Try line-by-line generic extraction,
+        # but reject weak values like a single capital letter.
+        # --------------------------------------------------
+        for line in lines:
+            m = re.match(
+                r"(?i)^\s*([A-Za-z])\s*(?:=|means|stands for)?\s+(.+?)\s*$",
+                line
+            )
+            if not m:
+                continue
+
+            key = m.group(1).upper()
+            val = m.group(2).strip(" ,;:-")
+
+            if key not in requested:
+                continue
+
+            # Reject bad extractions
+            if not val:
+                continue
+            if re.fullmatch(r"[A-Za-z]", val):
+                continue
+            if re.fullmatch(r"[A-Za-z]\+[A-Za-z]", val):
+                continue
+            if len(val) < 4:
+                continue
+
+            if key not in found:
+                found[key] = val
+                if meta not in supporting:
+                    supporting.append(meta)
+
+        if all(k in found for k in requested):
+            break
+
+    if not found:
+        return None, []
+
+    ordered = [(k, found[k]) for k in requested if k in found]
+    if not ordered:
+        return None, []
+
+    if lang == "pt":
+        if len(ordered) == 1:
+            k, v = ordered[0]
+            answer = f"{k} quer dizer “{v}”."
+        else:
+            parts = [f"{k} quer dizer “{v}”" for k, v in ordered]
+            answer = "; ".join(parts) + "."
+    else:
+        if len(ordered) == 1:
+            k, v = ordered[0]
+            answer = f"{k} means “{v}”."
+        else:
+            parts = [f"{k} means “{v}”" for k, v in ordered]
+            answer = "; ".join(parts) + "."
+
+    return answer, supporting
+
+
 def chunk_has_contact_payload(doc: str) -> bool:
     doc = doc or ""
     return bool(
@@ -1881,6 +2024,48 @@ def ask(data: Query):
                 q_mix,
                 mode="contacts"
             )
+            
+    # -----------------------------------------
+    # Deterministic abbreviation extraction
+    # -----------------------------------------
+    if want_abbrev:
+        direct_answer, direct_support = extract_abbreviation_answer(q, top, user_lang)
+
+        if direct_answer and direct_support:
+            final_sources_text = format_sources(direct_support)
+            final_sources_structured = build_structured_sources(direct_support)
+
+            resp = {
+                "answer": direct_answer,
+                "sources": final_sources_text,
+                "sources_structured": final_sources_structured
+            }
+
+            if DEBUG:
+                resp["debug"] = {
+                    "requested_courseid": data.courseid,
+                    "source_courseid": source_courseid,
+                    "collection_name": collection_name,
+                    "queries": queries,
+                    "q_for_retrieval": q_for_retrieval,
+                    "want_policy": want_policy,
+                    "want_contacts": want_contacts,
+                    "want_eligibility": want_eligibility,
+                    "want_abbrev": want_abbrev,
+                    "abbrev_direct_extraction": True,
+                    "final_sources_text": final_sources_text,
+                    "final_sources_structured": final_sources_structured,
+                    "timing_ms": {
+                        "retrieval": retrieval_ms,
+                        "rerank_and_context": round((time.perf_counter() - t0_rerank) * 1000, 1),
+                        "generation": 0.0,
+                        "total": round((time.perf_counter() - t0_total) * 1000, 1),
+                    },
+                    "context_preview": context[:800]
+                }
+
+            return resp
+        
     history_block = build_history_block(data.history)
     system_prompt = build_system_prompt(0 if is_global_scope else data.courseid)
     
