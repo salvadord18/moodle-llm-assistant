@@ -30,9 +30,9 @@ import psycopg2
 # -----------------------------
 # CONFIG
 # -----------------------------
-CHROMA_DB_PATH = "/var/www/moodledata/chroma_db"
+CHROMA_DB_PATH = os.getenv("CHROMA_DB_PATH", "/var/www/moodledata/chroma_db")
 
-OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://host.docker.internal:11434")
+OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://127.0.0.1:11434")
 OLLAMA_GEN_URL = f"{OLLAMA_BASE_URL}/api/generate"
 LLM_MODEL = os.getenv("OLLAMA_LLM_MODEL", "qwen2.5:3b")
 
