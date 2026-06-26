@@ -37,8 +37,11 @@ from html import unescape
 
 try:
     from bs4 import BeautifulSoup
-except ImportError:
-    BeautifulSoup = None
+except ImportError as exc:
+    raise SystemExit(
+        "Missing required dependency: beautifulsoup4. "
+        "Install it with: pip3 install beautifulsoup4"
+    ) from exc
 import fitz
 import psycopg2
 from chromadb import PersistentClient
@@ -51,14 +54,14 @@ MOODLEDATA_PATH = os.getenv("MOODLEDATA_PATH", "/var/www/moodledata/filedir")
 CHROMA_DB_PATH = os.getenv("CHROMA_DB_PATH", "/var/www/moodledata/chroma_db")
 TARGET_COURSE_ID = int(os.getenv("TARGET_COURSE_ID", "0"))
 RESET_COLLECTION = os.getenv("RESET_COLLECTION", "false").lower() == "true"
-DB_PREFIX = os.getenv("MOODLE_DB_PREFIX", "m_")
+DB_PREFIX = os.getenv("MOODLE_DB_PREFIX", "mdl_")
 
 DB = {
-    "host": os.getenv("MOODLE_DB_HOST", "db"),
+    "host": os.getenv("MOODLE_DB_HOST", "localhost"),
     "port": int(os.getenv("MOODLE_DB_PORT", "5432")),
     "dbname": os.getenv("MOODLE_DB_NAME", "moodle"),
     "user": os.getenv("MOODLE_DB_USER", "moodle"),
-    "password": os.getenv("MOODLE_DB_PASSWORD", "CHANGE_ME"),
+    "password": os.getenv("MOODLE_DB_PASSWORD", ""),
 }
 
 COURSE_CONTEXTLEVEL = 50
@@ -1651,6 +1654,16 @@ def ingest_course(chroma_client: PersistentClient, courseid: int) -> None:
 # MAIN
 # -----------------------------
 if __name__ == "__main__":
+    print("[CONFIG] MOODLEDATA_PATH =", MOODLEDATA_PATH)
+    print("[CONFIG] CHROMA_DB_PATH   =", CHROMA_DB_PATH)
+    print("[CONFIG] DB host          =", DB["host"])
+    print("[CONFIG] DB name          =", DB["dbname"])
+    print("[CONFIG] DB user          =", DB["user"])
+    print("[CONFIG] DB prefix        =", DB_PREFIX)
+    print("[CONFIG] TARGET_COURSE_ID =", TARGET_COURSE_ID)
+    print("[CONFIG] RESET_COLLECTION =", RESET_COLLECTION)
+
+    os.makedirs(CHROMA_DB_PATH, exist_ok=True)
     chroma = PersistentClient(path=CHROMA_DB_PATH)
 
     if TARGET_COURSE_ID > 0:
