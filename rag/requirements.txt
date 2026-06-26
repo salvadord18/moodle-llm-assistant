@@ -1,0 +1,8 @@
+fastapi
+uvicorn
+chromadb
+requests
+psycopg2-binary
+PyMuPDF
+beautifulsoup4
+pydantic
