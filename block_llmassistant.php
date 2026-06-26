@@ -86,13 +86,13 @@ class block_llmassistant extends block_base {
         }
 
         $welcomemessage = ($iscourse && !$isglobalsourcecourse)
-            ? 'Hi! Ask me something about this course.'
-            : 'Hi! Ask me about academic regulations, deadlines and faculty rules.';
+            ? get_string('welcome_course', 'block_llmassistant')
+            : get_string('welcome_global', 'block_llmassistant');
 
         $cfg = [
             'containerid'       => 'llm_chat_' . $uid,
             'containerclasses'  => 'llm-chat-container llm-chat-container--block',
-            'title'             => 'LLM Assistant',
+            'title'             => get_string('blocktitle', 'block_llmassistant'),
             'subtitle'          => '',
             'showopenbutton'    => true,
             'openbuttonid'      => 'llm_open_' . $uid,
@@ -101,7 +101,7 @@ class block_llmassistant extends block_base {
             'chatwindowclasses' => '',
             'inputwrapclass'    => 'llm-chat-inputwrap',
             'inputid'           => 'llm_input_' . $uid,
-            'placeholder'       => 'Write your question...',
+            'placeholder'       => get_string('placeholder', 'block_llmassistant'),
             'sendbuttonid'      => 'llm_send_' . $uid,
 
             'apiurl'            => $apiurl,
@@ -109,9 +109,9 @@ class block_llmassistant extends block_base {
             'sourcebaseurl'     => $sourcebaseurl,
             'courseid'          => $scopecourseid,
             'welcomemessage'    => $welcomemessage,
-            'labelsources'      => 'Sources:',
-            'labelthinking'     => 'Thinking...',
-            'labelclearconfirm' => 'Are you sure you want to clear this chat?',
+            'labelsources'      => get_string('sources', 'block_llmassistant'),
+            'labelthinking'     => get_string('thinking', 'block_llmassistant'),
+            'labelclearconfirm' => get_string('clearconfirm', 'block_llmassistant'),
             'openurl'           => $openurl,
         ];
 
