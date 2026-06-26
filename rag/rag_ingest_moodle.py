@@ -185,7 +185,7 @@ def normalize_table_header(text: str) -> str:
     return t
 
 
-def extract_html_tables(html: str) -> List[Dict]:
+def extract_html_tables(html: str, default_table_name: str = "") -> List[Dict]:
     """
     Extract structured table rows from HTML.
 
@@ -217,7 +217,7 @@ def extract_html_tables(html: str) -> List[Dict]:
         data_rows: List[Dict] = []
 
         # Try to infer a table title from the nearest previous heading
-        table_name = f"Table {ti}"
+        table_name = default_table_name or f"Table {ti}"
         prev = table.find_previous(["h1", "h2", "h3", "h4"])
         if prev:
             candidate = normalize(prev.get_text(" ", strip=True))
@@ -268,40 +268,125 @@ def extract_html_tables(html: str) -> List[Dict]:
             })
             
         if data_rows:
+            if not headers:
+                max_cols = max(len(r.get("cells", {})) for r in data_rows)
+                headers = [f"Column {i}" for i in range(1, max_cols + 1)]
+
             results.append({
                 "table_name": table_name,
                 "headers": headers,
-                "rows": data_rows
+                "rows": data_rows,
             })
 
     return results
 
 
-def build_table_row_text(table_name: str, row: Dict) -> str:
-    parts = [f"Table: {table_name}"]
-    for header, value in row.get("cells", {}).items():
-        if value:
-            parts.append(f"{header}: {value}")
+def build_table_row_text(
+    table_name: str,
+    row: Dict,
+    *,
+    source_title: str = "",
+    section_title: str = "",
+    item_type: str = "",
+    legends: List[str] = None
+) -> str:
+    """
+    Build a self-contained chunk for one table row.
+
+    The goal is for each row to preserve the relationship between columns,
+    instead of leaving the model to infer it from loose text.
+    """
+    legends = legends or []
+    cells = row.get("cells", {}) or {}
+    row_index = row.get("row_index", "")
+
+    parts = [
+        "Moodle structured table row.",
+    ]
+
+    if source_title:
+        parts.append(f"Source item: {source_title}")
+
+    if item_type:
+        parts.append(f"Source type: {item_type}")
+
+    if section_title:
+        parts.append(f"Section: {section_title}")
+
+    if table_name:
+        parts.append(f"Table: {table_name}")
+
+    if row_index != "":
+        parts.append(f"Row index: {row_index}")
+
+    parts.append("")
+
+    for header, value in cells.items():
+        header = normalize_table_header(header)
+        value = normalize(value)
+
+        if not header or not value:
+            continue
+
+        parts.append(f"{header}: {value}")
+
+    if legends:
+        parts.append("")
+        parts.append("Table legend:")
+        for legend in legends:
+            parts.append(f"- {legend}")
+
     return "\n".join(parts).strip()
 
 
-def extract_schedule_legend_chunks(text: str) -> List[str]:
+def extract_table_legends(text: str) -> List[str]:
     """
-    Extract legend-like lines such as:
-    D deliver chapter on Moodle, P Present (5 min each)
+    Extract generic table/schedule legend-like lines.
+
+    Examples:
+    - D deliver chapter on Moodle, P Present (5 min each)
+    - D = deliver chapter on Moodle; P = Present (5 min each)
+    - *For some students, chapter 3 can include...
     """
     text = normalize(text or "")
-    out = []
+    if not text:
+        return []
 
-    # Strong pattern for the known schedule legend
-    m = re.search(
-        r"(?is)(D\s+deliver\s+chapter\s+on\s+Moodle.*?P\s+Present\s*\(5\s*min(?:utes)?\s*each\))",
-        text
-    )
-    if m:
-        out.append(normalize(m.group(1)))
+    legends: List[str] = []
 
-    return out
+    # Pattern for D/P-style legends.
+    patterns = [
+        r"(?is)\bD\b\s*(?:=|:)?\s*deliver\s+chapter\s+on\s+Moodle.*?\bP\b\s*(?:=|:)?\s*Present\s*\(5\s*min(?:utes)?\s*each\)",
+        r"(?is)\bD\b.*?deliver.*?\bP\b.*?present.*?\(.*?min.*?each.*?\)",
+    ]
+
+    for pat in patterns:
+        for m in re.finditer(pat, text):
+            legend = normalize(m.group(0))
+            if legend and legend not in legends:
+                legends.append(legend)
+
+    # Also keep short footnote-like lines close to table meaning.
+    for line in text.splitlines():
+        line_clean = normalize(line)
+        if not line_clean:
+            continue
+
+        lower = line_clean.lower()
+
+        if (
+            len(line_clean) <= 220
+            and (
+                "deliver chapter" in lower
+                or ("present" in lower and "min" in lower)
+                or lower.startswith("*for some students")
+                or "chapter 3 can include" in lower
+            )
+        ):
+            if line_clean not in legends:
+                legends.append(line_clean)
+
+    return legends
 
 def format_unix_ts(ts) -> str:
     """
@@ -1196,6 +1281,58 @@ def extract_page_texts(pdf_path: str) -> List[Tuple[int, str]]:
 
     return page_texts
 
+def infer_table_section_type(table_name: str, headers: List[str], row_text: str) -> str:
+    """
+    Infer the semantic type of a structured table row using table name,
+    headers and row content.
+    """
+    joined = " ".join([
+        table_name or "",
+        " ".join(headers or []),
+        row_text or "",
+    ]).lower()
+
+    schedule_terms = [
+        "schedule",
+        "calendar",
+        "class",
+        "classes",
+        "class #",
+        "class number",
+        "class description",
+        "deliverables",
+        "time",
+        "date",
+        "hybrid",
+        "chapter",
+        "thesis",
+        "project",
+        "turma",
+        "aula",
+        "aulas",
+        "calendário",
+        "horário",
+    ]
+
+    assessment_terms = [
+        "evaluation",
+        "evaluation (%)",
+        "assessment",
+        "grade",
+        "grading",
+        "weight",
+        "%",
+        "avaliação",
+    ]
+
+    if any(t in joined for t in schedule_terms):
+        return "schedule"
+
+    if any(t in joined for t in assessment_terms):
+        return "assessment"
+
+    return infer_section_type(row_text)
+
 
 def build_records_for_pdf(courseid: int, contenthash: str, filename: str, contextlevel: int) -> Tuple[List[str], List[str], List[Dict]]:
     pdf_path = pdf_path_from_hash(contenthash)
@@ -1293,7 +1430,10 @@ def build_records_for_moodle_text(courseid: int, item: Dict) -> Tuple[List[str],
     sectionnum = item.get("sectionnum", None)
     contextlevel = int(item.get("contextlevel", COURSE_CONTEXTLEVEL))
 
-    if source_type in {"label", "section_summary"} and infer_section_type(cleaned_text) == "schedule":
+    tables = extract_html_tables(raw_html, default_table_name=title)
+    has_tables = bool(tables)
+
+    if source_type in {"label", "section_summary"} and has_tables:
         blocks = []
     else:
         blocks = split_into_structured_blocks(cleaned_text)
@@ -1332,18 +1472,34 @@ def build_records_for_moodle_text(courseid: int, item: Dict) -> Tuple[List[str],
     # -----------------------------------------
     # TABLE ROW CHUNKS
     # -----------------------------------------
-    tables = extract_html_tables(raw_html)
+
+    # Extract legends from the full cleaned item text.
+    # These legends are attached to each table row so that rows are self-contained.
+    table_legends = extract_table_legends(cleaned_text)
 
     for ti, table in enumerate(tables):
-        table_name = table.get("table_name", f"Table {ti+1}")
+        table_name = table.get("table_name", f"Table {ti + 1}")
+        headers = table.get("headers", []) or []
+
         for row in table.get("rows", []):
             row_index = row.get("row_index", 0)
-            row_text = build_table_row_text(table_name, row)
+
+            row_text = build_table_row_text(
+                table_name,
+                row,
+                source_title=title,
+                section_title=title if source_type in {"section_summary", "label"} else "",
+                item_type=source_type,
+                legends=table_legends,
+            )
 
             if len(row_text) < MIN_MOODLE_TEXT_CHARS:
                 continue
 
+            row_section_type = infer_table_section_type(table_name, headers, row_text)
+
             rec_id = f"{base_id}:table:{ti}:row:{row_index}"
+
             ids.append(rec_id)
             docs.append(row_text)
             metas.append({
@@ -1352,7 +1508,7 @@ def build_records_for_moodle_text(courseid: int, item: Dict) -> Tuple[List[str],
                 "page": -1,
                 "chunk_index": int(row_index),
                 "contextlevel": contextlevel,
-                "section_type": infer_section_type(row_text),
+                "section_type": row_section_type,
                 "title_hint": title,
                 "contenthash": "",
                 "chunk_type": "table_row",
@@ -1366,12 +1522,14 @@ def build_records_for_moodle_text(courseid: int, item: Dict) -> Tuple[List[str],
                 "sectionnum": int(sectionnum) if sectionnum is not None else -1,
                 "table_name": table_name,
                 "row_index": int(row_index),
+                "table_headers": " | ".join(headers),
             })
             
     # -----------------------------------------
     # TABLE LEGEND CHUNKS
     # -----------------------------------------
-    legends = extract_schedule_legend_chunks(cleaned_text)
+    legends = table_legends
+
     for li, legend in enumerate(legends):
         rec_id = f"{base_id}:legend:{li}"
         ids.append(rec_id)
@@ -1382,7 +1540,7 @@ def build_records_for_moodle_text(courseid: int, item: Dict) -> Tuple[List[str],
             "page": -1,
             "chunk_index": int(10000 + li),
             "contextlevel": contextlevel,
-            "section_type": infer_section_type(legend),
+            "section_type": "schedule",
             "title_hint": title,
             "contenthash": "",
             "chunk_type": "table_legend",
