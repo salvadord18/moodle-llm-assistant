@@ -10,6 +10,7 @@ The plugin includes:
 - A Python RAG API built with FastAPI/Uvicorn.
 - A Moodle ingestion script that indexes course documents and Moodle-native content into ChromaDB.
 - Source display for retrieved documents and Moodle-native material.
+- Optional debug/result logging for evaluation, storing one JSON snapshot per question and maintaining a CSV summary.
 
 > **Important:** the Moodle plugin does not answer questions by itself. The Python RAG API must be running, and Moodle course content must be ingested before the assistant can answer properly.
 
@@ -234,6 +235,10 @@ LLMASSISTANT_RERANK_ALPHA=0.55
 LLMASSISTANT_RERANK_BETA=0.45
 
 LLMASSISTANT_MATH_FORMAT=latex
+
+# Set to 1 only for development/testing/evaluation.
+# When enabled, the backend returns debug information to Moodle.
+# Moodle then saves one JSON snapshot per question and updates a CSV summary.
 LLMASSISTANT_DEBUG=0
 
 # Optional ingestion controls.
@@ -351,7 +356,7 @@ Re-run ingestion whenever course materials are added, removed, or updated.
 
 ## 10. Starting the RAG API manually
 
-For testing:
+For testing without debug mode:
 
 ```bash
 set -a
@@ -370,6 +375,56 @@ uvicorn rag_api:app --host 0.0.0.0 --port 8001
 
 Only use `0.0.0.0` if firewall and network access are properly controlled.
 
+### Starting manually with debug/result logging enabled
+
+For development, testing, or evaluation, the RAG API can be started with debug mode enabled:
+
+```bash
+set -a
+source /etc/llmassistant/rag.env
+set +a
+
+cd /var/www/html/blocks/llmassistant/rag
+LLMASSISTANT_DEBUG=1 uvicorn rag_api:app --host 127.0.0.1 --port 8001
+```
+
+In debug mode, the Python backend returns a `debug` object in each response. When Moodle receives this debug information, `rag_endpoint.php` stores an evaluation snapshot for each chat question.
+
+Debug/result files are stored under:
+
+```text
+/var/www/moodledata/llmassistant_results
+```
+
+For each question submitted through the Moodle chat, the plugin creates:
+
+- one JSON snapshot containing the question, request payload, backend response, final response, sources, timings, and debug fields;
+- one appended row in the summary CSV file:
+
+```text
+/var/www/moodledata/llmassistant_results/all_results_summary.csv
+```
+
+The JSON files are grouped by course, for example:
+
+```text
+/var/www/moodledata/llmassistant_results/course_5_<course_shortname>/
+```
+
+Use debug mode only when detailed logs or evaluation data are needed. For normal production usage, keep:
+
+```env
+LLMASSISTANT_DEBUG=0
+```
+
+If permission errors occur when writing the result logs, ensure the Moodle web server user can write to the results folder:
+
+```bash
+sudo mkdir -p /var/www/moodledata/llmassistant_results
+sudo chown -R www-data:www-data /var/www/moodledata/llmassistant_results
+sudo chmod -R 775 /var/www/moodledata/llmassistant_results
+```
+
 ---
 
 ## 11. Running the RAG API as a system service
@@ -380,7 +435,7 @@ Create:
 /etc/systemd/system/moodle-llmassistant-rag.service
 ```
 
-Example service:
+Example service for normal usage:
 
 ```ini
 [Unit]
@@ -399,7 +454,25 @@ RestartSec=5
 WantedBy=multi-user.target
 ```
 
-Enable and start:
+To run the service with debug/result logging enabled, either set this value in `/etc/llmassistant/rag.env`:
+
+```env
+LLMASSISTANT_DEBUG=1
+```
+
+or add this line to the `[Service]` section of the systemd unit:
+
+```ini
+Environment=LLMASSISTANT_DEBUG=1
+```
+
+When debug mode is enabled and users ask questions in the Moodle chat, JSON result snapshots and the CSV summary are written to:
+
+```text
+/var/www/moodledata/llmassistant_results
+```
+
+Enable and start the service:
 
 ```bash
 sudo systemctl daemon-reload
@@ -435,6 +508,8 @@ Expected response:
 }
 ```
 
+If debug mode is enabled, the `debug` value should be `true`.
+
 Then, test a question:
 
 ```bash
@@ -451,6 +526,8 @@ Expected response:
   "sources": []
 }
 ```
+
+If debug mode is enabled, the response should also include a `debug` object.
 
 If the answer says that no information was found, check:
 
@@ -600,6 +677,34 @@ cd /var/www/html/blocks/llmassistant/rag
 TARGET_COURSE_ID=<courseid> RESET_COLLECTION=true python3 rag_ingest_moodle.py
 ```
 
+### Debug files are not being created
+
+Debug/result files are only created when the Python backend returns debug information. Confirm that debug mode is enabled:
+
+```bash
+curl http://127.0.0.1:8001/health
+```
+
+The response should include:
+
+```json
+"debug": true
+```
+
+Then check permissions:
+
+```bash
+ls -la /var/www/moodledata/llmassistant_results
+```
+
+If needed:
+
+```bash
+sudo mkdir -p /var/www/moodledata/llmassistant_results
+sudo chown -R www-data:www-data /var/www/moodledata/llmassistant_results
+sudo chmod -R 775 /var/www/moodledata/llmassistant_results
+```
+
 ### Database connection errors
 
 Check these values in `/etc/llmassistant/rag.env`:
@@ -621,6 +726,7 @@ Ensure the web server user can access:
 ```bash
 /var/www/moodledata/chroma_db
 /var/www/html/blocks/llmassistant/rag
+/var/www/moodledata/llmassistant_results
 ```
 
 Example:
@@ -628,6 +734,9 @@ Example:
 ```bash
 sudo chown -R www-data:www-data /var/www/moodledata/chroma_db
 sudo chmod -R 775 /var/www/moodledata/chroma_db
+sudo mkdir -p /var/www/moodledata/llmassistant_results
+sudo chown -R www-data:www-data /var/www/moodledata/llmassistant_results
+sudo chmod -R 775 /var/www/moodledata/llmassistant_results
 ```
 
 ---
@@ -663,6 +772,7 @@ to trigger the Moodle upgrade process.
 - Store database credentials securely outside the Moodle webroot, for example in `/etc/llmassistant/rag.env`.
 - Do not commit production secrets to the plugin repository.
 - Do not include a real `.env` file with passwords in the plugin ZIP.
+- Debug mode can store user questions, assistant answers, retrieved sources, timing data, and backend debug fields in Moodledata. Enable debug mode only for development, testing, or evaluation.
 - Validate access control in Moodle so users only query course content they are allowed to access.
 
 ---
