@@ -193,31 +193,53 @@ SCHEDULE_QUESTION_RE = re.compile(
 CLASS_NUM_RE = re.compile(r"\b(?:class|aula)\s+(\d+)\b", re.IGNORECASE)
 TRACK_RE = re.compile(r"\b(thesis|project|tese|projeto)\b", re.IGNORECASE)
 
-DB_PREFIX = os.getenv("MOODLE_DB_PREFIX", "m_")
+DB_PREFIX = os.getenv("MOODLE_DB_PREFIX", "mdl_")
 
 DB = {
-    "host": os.getenv("MOODLE_DB_HOST", "db"),
+    "host": os.getenv("MOODLE_DB_HOST", "localhost"),
     "port": int(os.getenv("MOODLE_DB_PORT", "5432")),
     "dbname": os.getenv("MOODLE_DB_NAME", "moodle"),
     "user": os.getenv("MOODLE_DB_USER", "moodle"),
-    "password": os.getenv("MOODLE_DB_PASSWORD", "CHANGE_ME"),
+    "password": os.getenv("MOODLE_DB_PASSWORD", ""),
 }
 
 GLOBAL_SOURCE_PATTERNS = [
-    "serviços académicos",
-    "servicos academicos",
-    "academic services",
+    s.strip()
+    for s in os.getenv(
+        "LLMASSISTANT_GLOBAL_SOURCE_PATTERNS",
+        "serviços académicos,servicos academicos,academic services"
+    ).split(",")
+    if s.strip()
 ]
 
 # -----------------------------
 # INIT
 # -----------------------------
+print("[CONFIG] CHROMA_DB_PATH =", CHROMA_DB_PATH)
+print("[CONFIG] OLLAMA_BASE_URL =", OLLAMA_BASE_URL)
+print("[CONFIG] OLLAMA_LLM_MODEL =", LLM_MODEL)
+print("[CONFIG] MOODLE_DB_HOST =", DB["host"])
+print("[CONFIG] MOODLE_DB_NAME =", DB["dbname"])
+print("[CONFIG] MOODLE_DB_USER =", DB["user"])
+print("[CONFIG] MOODLE_DB_PREFIX =", DB_PREFIX)
+print("[CONFIG] DEBUG =", DEBUG)
+
+os.makedirs(CHROMA_DB_PATH, exist_ok=True)
+
 client = PersistentClient(path=CHROMA_DB_PATH)
 embedding_fn = DefaultEmbeddingFunction()
 
 app = FastAPI()
 _session = requests.Session()
 
+@app.get("/health")
+def health():
+    return {
+        "status": "ok",
+        "model": LLM_MODEL,
+        "chroma_db_path": CHROMA_DB_PATH,
+        "debug": DEBUG,
+    }
 
 class Query(BaseModel):
     question: str
