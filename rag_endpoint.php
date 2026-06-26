@@ -587,7 +587,11 @@ try {
     $userid = $USER->id;
     $userlang = llmassistant_detect_language($question);
 
-    $apiurl = 'http://127.0.0.1:8001/ask';
+    $apiurl = trim((string)get_config('block_llmassistant', 'rag_api_url'));
+
+    if ($apiurl === '') {
+        $apiurl = 'http://127.0.0.1:8001/ask';
+    }
 
     /**
      * Load recent conversation history so the Python backend
@@ -683,6 +687,7 @@ try {
             'debug'   => [
                 'http_code' => $httpcode,
                 'rag_response' => $response,
+                'rag_api_url' => $apiurl,
             ],
         ];
 
@@ -706,6 +711,7 @@ try {
             'sources' => [],
             'debug'   => [
                 'rag_response' => $response,
+                'rag_api_url' => $apiurl,
             ],
         ];
 
