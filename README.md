@@ -16,6 +16,49 @@ The plugin includes:
 
 ---
 
+## Table of contents
+
+- [1. Architecture](#1-architecture)
+- [2. Requirements](#2-requirements)
+  - [Moodle server](#moodle-server)
+  - [Python packages](#python-packages)
+- [3. Installing the Moodle plugin](#3-installing-the-moodle-plugin)
+- [4. Moodle plugin configuration](#4-moodle-plugin-configuration)
+- [5. Environment configuration](#5-environment-configuration)
+- [6. Example `.env.example`](#6-example-envexample)
+- [7. Pulling the LLM model](#7-pulling-the-llm-model)
+- [8. Creating the ChromaDB directory](#8-creating-the-chromadb-directory)
+- [9. Ingesting Moodle course content](#9-ingesting-moodle-course-content)
+  - [Ingest a single course](#ingest-a-single-course)
+  - [Rebuild a single course collection](#rebuild-a-single-course-collection)
+  - [Rebuild all collections](#rebuild-all-collections)
+- [10. Starting the RAG API manually](#10-starting-the-rag-api-manually)
+  - [Starting manually with debug/result logging enabled](#starting-manually-with-debugresult-logging-enabled)
+- [11. Running the RAG API as a system service](#11-running-the-rag-api-as-a-system-service)
+- [12. Testing the RAG API](#12-testing-the-rag-api)
+- [13. Using the assistant in Moodle](#13-using-the-assistant-in-moodle)
+  - [Course chat](#course-chat)
+  - [Dedicated course chat page](#dedicated-course-chat-page)
+  - [Global chat](#global-chat)
+- [14. Re-indexing strategy](#14-re-indexing-strategy)
+- [15. Known limitations](#15-known-limitations)
+- [16. Troubleshooting](#16-troubleshooting)
+  - [The Moodle chat keeps loading](#the-moodle-chat-keeps-loading)
+  - [The API cannot reach Ollama](#the-api-cannot-reach-ollama)
+  - [No answer found for a course](#no-answer-found-for-a-course)
+  - [Debug files are not being created](#debug-files-are-not-being-created)
+  - [Database connection errors](#database-connection-errors)
+  - [Permission errors](#permission-errors)
+- [17. Development notes](#17-development-notes)
+- [18. Security notes](#18-security-notes)
+- [19. Files to include in the plugin ZIP](#19-files-to-include-in-the-plugin-zip)
+- [20. Files to exclude from the plugin ZIP](#20-files-to-exclude-from-the-plugin-zip)
+- [21. Creating the plugin ZIP](#21-creating-the-plugin-zip)
+- [22. Validation commands before delivery](#22-validation-commands-before-delivery)
+- [23. Important deployment note](#23-important-deployment-note)
+
+---
+
 ## 1. Architecture
 
 The system has three main components:
