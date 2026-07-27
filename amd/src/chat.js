@@ -16,6 +16,11 @@ define(['core/log'], function(Log) {
         const labelThinking = config.labelThinking || "Thinking...";
         const labelClearConfirm = config.labelClearConfirm || "Are you sure you want to clear this chat?";
         const openUrl = config.openUrl || "";
+        const labelNoAnswer = config.labelNoAnswer || "No answer returned.";
+        const labelStopped = config.labelStopped || "Generation stopped.";
+        const labelContactError = config.labelContactError || "Error contacting the assistant. Please try again.";
+        const labelStop = config.labelStop || "Stop generating";
+        const labelSend = config.labelSend || "Send message";
 
         const chatWindow = document.getElementById(config.chatWindowId);
         const sendBtn = document.getElementById(config.sendButtonId);
@@ -467,7 +472,7 @@ define(['core/log'], function(Log) {
                 const answer =
                     (typeof data.answer === "string" && data.answer.trim() !== "")
                         ? data.answer.trim()
-                        : "No answer returned.";
+                        : labelNoAnswer;
 
                 addAssistantMessage(
                     answer,
@@ -482,9 +487,9 @@ define(['core/log'], function(Log) {
 
                 // Abort is intentional stop by user; do not show error bubble.
                 if (err && err.name === "AbortError") {
-                    addMessage("Generation stopped.", "bot");
+                    addMessage(labelStopped, "bot");
                 } else {
-                    addMessage("Error contacting the assistant. Please try again.", "bot");
+                    addMessage(labelContactError, "bot");
                 }
             } finally {
                 currentController = null;
@@ -540,13 +545,13 @@ define(['core/log'], function(Log) {
         function updateSendButtonState() {
             if (isBusy) {
                 sendBtn.disabled = false; // keep clickable so it can stop
-                sendBtn.setAttribute("aria-label", "Stop generating");
-                sendBtn.setAttribute("title", "Stop generating");
+                sendBtn.setAttribute("aria-label", labelStop);
+                sendBtn.setAttribute("title", labelStop);
                 sendBtn.classList.add("llm-send-icon--stop");
             } else {
                 sendBtn.disabled = false;
-                sendBtn.setAttribute("aria-label", "Send message");
-                sendBtn.setAttribute("title", "Send message");
+                sendBtn.setAttribute("aria-label", labelSend);
+                sendBtn.setAttribute("title", labelSend);
                 sendBtn.classList.remove("llm-send-icon--stop");
             }
         }

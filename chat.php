@@ -13,7 +13,7 @@ $PAGE->requires->css('/blocks/llmassistant/styles.css');
 $PAGE->set_url(new moodle_url('/blocks/llmassistant/chat.php', ['courseid' => $courseid]));
 $PAGE->set_context($context);
 $PAGE->set_pagelayout('course');
-$PAGE->set_title('LLM Course Assistant');
+$PAGE->set_title(get_string('courseassistanttitle', 'block_llmassistant'));
 $PAGE->set_heading($course->fullname);
 $PAGE->add_body_class('llm-page-coursechat');
 
@@ -24,8 +24,8 @@ $sourcebaseurl = $CFG->wwwroot . '/blocks/llmassistant/source_file.php/';
 $cfg = [
     'containerid'       => 'llm_chat_page',
     'containerclasses'  => 'llm-chat-container llm-chat-container--coursepage',
-    'title'             => 'LLM Assistant',
-    'subtitle'          => 'Course materials, assessment and questions for ' . $course->fullname,
+    'title'             => get_string('blocktitle', 'block_llmassistant'),
+    'subtitle'          => get_string('courseassistantsubtitle', 'block_llmassistant', $course->fullname),
     'showopenbutton'    => false,
     'openbuttonid'      => '',
     'clearbuttonid'     => 'llm_clear',
@@ -33,17 +33,17 @@ $cfg = [
     'chatwindowclasses' => 'llm-chat-window--expanded',
     'inputwrapclass'    => 'llm-input-row',
     'inputid'           => 'llm_input',
-    'placeholder'       => 'Write your question...',
+    'placeholder'       => get_string('placeholder', 'block_llmassistant'),
     'sendbuttonid'      => 'llm_send',
 
     'apiurl'            => $apiurl,
     'historyurl'        => $historyurl,
     'sourcebaseurl'     => $sourcebaseurl,
     'courseid'          => (int)$courseid,
-    'welcomemessage'    => 'Hi! Ask me something about this course.',
-    'labelsources'      => 'Sources:',
-    'labelthinking'     => 'Thinking...',
-    'labelclearconfirm' => 'Are you sure you want to clear this chat?',
+    'welcomemessage'    => get_string('welcome_course', 'block_llmassistant'),
+    'labelsources'      => get_string('sources', 'block_llmassistant'),
+    'labelthinking'     => get_string('thinking', 'block_llmassistant'),
+    'labelclearconfirm' => get_string('clearconfirm', 'block_llmassistant'),
     'openurl'           => '',
 ];
 

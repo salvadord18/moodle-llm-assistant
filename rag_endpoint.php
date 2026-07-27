@@ -10,6 +10,9 @@ ob_start();
 require_once(__DIR__ . '/../../config.php');
 require_once($CFG->dirroot . '/blocks/llmassistant/classes/local/history_manager.php');
 
+use block_llmassistant\local\config;
+use block_llmassistant\local\global_source;
+
 /**
  * Lightweight language detection from the user question.
  * Returns 'pt' or 'en'.
@@ -585,13 +588,10 @@ try {
     $question = required_param('question', PARAM_TEXT);
     $courseid = required_param('courseid', PARAM_INT);
     $userid = $USER->id;
+    global_source::require_scope_access($courseid);
     $userlang = llmassistant_detect_language($question);
 
-    $apiurl = trim((string)get_config('block_llmassistant', 'rag_api_url'));
-
-    if ($apiurl === '') {
-        $apiurl = 'http://127.0.0.1:8001/ask';
-    }
+    $apiurl = config::rag_api_url();
 
     /**
      * Load recent conversation history so the Python backend
@@ -600,10 +600,11 @@ try {
      * history_endpoint.php already shows that history_manager::load_history($userid, $courseid)
      * exists and returns role/message/timecreated records. [1](https://liveeduisegiunl-my.sharepoint.com/personal/20240597_novaims_unl_pt/Documents/Microsoft%20Copilot%20Chat%20Files/rag_endpoint.php)
      */
-    $historyrows = \block_llmassistant\local\history_manager::load_history($userid, $courseid);
-
-    // Keep only the last few turns to avoid making the payload too large.
-    $historyrows = array_slice($historyrows, -6);
+    $historyrows = \block_llmassistant\local\history_manager::load_recent_history(
+        $userid,
+        $courseid,
+        config::history_message_limit()
+    );
 
     $history = [];
     foreach ($historyrows as $row) {
@@ -632,8 +633,8 @@ try {
     curl_setopt($ch, CURLOPT_HTTPHEADER, ['Content-Type: application/json']);
     curl_setopt($ch, CURLOPT_POST, true);
     curl_setopt($ch, CURLOPT_POSTFIELDS, $payload);
-    curl_setopt($ch, CURLOPT_CONNECTTIMEOUT, 10);
-    curl_setopt($ch, CURLOPT_TIMEOUT, 180);
+    curl_setopt($ch, CURLOPT_CONNECTTIMEOUT, config::connect_timeout());
+    curl_setopt($ch, CURLOPT_TIMEOUT, config::request_timeout());
 
     $response = curl_exec($ch);
 
@@ -722,7 +723,7 @@ try {
     }
 
     // Save result snapshots only when backend debug is enabled.
-    $saveresults = !empty($data['debug']);
+    $saveresults = config::result_logging_enabled() && !empty($data['debug']);
 
     $answer = trim((string)($data['answer'] ?? ''));
     if ($answer === '') {

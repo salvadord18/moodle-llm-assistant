@@ -19,6 +19,7 @@ require_sesskey();
 $action = required_param('action', PARAM_ALPHA);
 $courseid = required_param('courseid', PARAM_INT);
 $userid = $USER->id;
+\block_llmassistant\local\global_source::require_scope_access($courseid);
 
 try {
 
@@ -47,13 +48,11 @@ try {
         exit;
     }
 
-    echo json_encode(['error' => 'Invalid action']);
+    echo json_encode(['error' => get_string('invalidaction', 'block_llmassistant')]);
     exit;
 
 } catch (Throwable $e) {
-    echo json_encode([
-        'error' => 'Server error',
-        'debug' => $e->getMessage()
-    ]);
+    debugging('LLM Assistant history endpoint error: ' . $e->getMessage(), DEBUG_DEVELOPER);
+    echo json_encode(['error' => get_string('servererror', 'block_llmassistant')]);
     exit;
 }

@@ -20,6 +20,9 @@ class chat_ui {
             'inputid'           => $cfg['inputid'],
             'placeholder'       => $cfg['placeholder'] ?? get_string('placeholder', 'block_llmassistant'),
             'sendbuttonid'      => $cfg['sendbuttonid'],
+            'labelexpand'       => get_string('expandchat', 'block_llmassistant'),
+            'labelclear'        => get_string('clearchat', 'block_llmassistant'),
+            'labelsend'         => get_string('sendmessage', 'block_llmassistant'),
         ];
     }
 
@@ -39,6 +42,11 @@ class chat_ui {
             'inputId'           => $cfg['inputid'],
             'clearButtonId'     => $cfg['clearbuttonid'],
             'openButtonId'      => $cfg['openbuttonid'] ?? '',
+            'labelNoAnswer'     => get_string('noanswer', 'block_llmassistant'),
+            'labelStopped'      => get_string('generationstopped', 'block_llmassistant'),
+            'labelContactError' => get_string('errorcontacting', 'block_llmassistant'),
+            'labelStop'         => get_string('stopgenerating', 'block_llmassistant'),
+            'labelSend'         => get_string('sendmessage', 'block_llmassistant'),
         ];
     }
 }

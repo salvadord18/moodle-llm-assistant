@@ -2,6 +2,7 @@
 defined('MOODLE_INTERNAL') || die();
 
 use block_llmassistant\local\chat_ui;
+use block_llmassistant\local\global_source;
 
 class block_llmassistant extends block_base {
 
@@ -23,30 +24,12 @@ class block_llmassistant extends block_base {
     }
 
     /**
-     * Detect if a course should behave as the GLOBAL regulations source
-     * based on course fullname / shortname.
+     * Indicates that this block has global plugin settings.
+     *
+     * @return bool
      */
-    protected function is_global_source_course($course): bool {
-        if (empty($course) || empty($course->id)) {
-            return false;
-        }
-
-        $patterns = [
-            'serviços académicos',
-            'servicos academicos',
-            'academic services',
-        ];
-
-        $fullname = core_text::strtolower((string)($course->fullname ?? ''));
-        $shortname = core_text::strtolower((string)($course->shortname ?? ''));
-
-        foreach ($patterns as $pattern) {
-            if (mb_stripos($fullname, $pattern) !== false || mb_stripos($shortname, $pattern) !== false) {
-                return true;
-            }
-        }
-
-        return false;
+    public function has_config() {
+        return true;
     }
 
     public function get_content() {
@@ -73,7 +56,7 @@ class block_llmassistant extends block_base {
             $PAGE->context->contextlevel == CONTEXT_COURSE
         );
 
-        $isglobalsourcecourse = $iscourse && $this->is_global_source_course($COURSE);
+        $isglobalsourcecourse = $iscourse && global_source::is_global_course($COURSE);
 
         $scopecourseid = ($iscourse && !$isglobalsourcecourse) ? (int)$COURSE->id : 0;
 

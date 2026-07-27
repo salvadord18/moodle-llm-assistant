@@ -27,40 +27,10 @@ if ($source === '') {
 
 require_login();
 
-function llmassistant_normalize_compare(string $text): string {
-    $text = core_text::strtolower(trim($text));
-    $text = iconv('UTF-8', 'ASCII//TRANSLIT//IGNORE', $text);
-    $text = preg_replace('/\s+/', ' ', $text);
-    return trim((string)$text);
-}
 
-function llmassistant_resolve_global_source_course_id(): int {
-    global $DB;
-
-    $patterns = [
-        'serviços académicos',
-        'servicos academicos',
-        'academic services',
-    ];
-
-    $courses = $DB->get_records('course', null, 'id ASC', 'id, fullname, shortname');
-
-    foreach ($courses as $course) {
-        $fullname = llmassistant_normalize_compare((string)($course->fullname ?? ''));
-        $shortname = llmassistant_normalize_compare((string)($course->shortname ?? ''));
-
-        foreach ($patterns as $pattern) {
-            $p = llmassistant_normalize_compare($pattern);
-            if (strpos($fullname, $p) !== false || strpos($shortname, $p) !== false) {
-                return (int)$course->id;
-            }
-        }
-    }
-
-    throw new moodle_exception('Could not resolve global source course');
-}
-
-$sourcecourseid = ($courseid === 0) ? llmassistant_resolve_global_source_course_id() : $courseid;
+$sourcecourseid = ($courseid === 0)
+    ? \block_llmassistant\local\global_source::course_id()
+    : $courseid;
 
 if ($sourcecourseid > 0 && $courseid !== 0) {
     $course = get_course($sourcecourseid);
@@ -205,5 +175,5 @@ while (ob_get_level()) {
 }
 
 send_stored_file($file, 0, 0, false, [
-    'cacheability' => 'public',
+    'cacheability' => 'private',
 ]);

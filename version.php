@@ -2,7 +2,7 @@
 defined('MOODLE_INTERNAL') || die();
 
 $plugin->component = 'block_llmassistant';
-$plugin->version = 2026040701;   // YYYYMMDDXX
+$plugin->version = 2026072700;   // YYYYMMDDXX
 $plugin->requires  = 2022041900;      // Ajusta ao teu Moodle (valor seguro para Moodle 4.x)
 $plugin->maturity  = MATURITY_ALPHA;
-$plugin->release   = '0.1';
+$plugin->release   = '0.2.0';
