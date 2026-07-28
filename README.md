@@ -1,77 +1,143 @@
 # Moodle LLM Assistant
 
-`block_llmassistant` is a Moodle block plugin developed as the software artefact of a Master's project at NOVA Information Management School. The prototype provides an LLM-based assistant for Moodle courses and uses a Retrieval-Augmented Generation (RAG) architecture to answer questions using retrieved course-specific and institutional information.
+`block_llmassistant` is a Moodle block plugin developed as the software artefact of a Master's project at NOVA Information Management School. The plugin provides an LLM-based assistant for Moodle courses and uses Retrieval-Augmented Generation (RAG) to answer questions using retrieved course-specific and institutional information.
 
-The main evaluated configuration used course and institutional PDF collections. The prototype was subsequently extended to ingest selected Moodle-native content, including activities, links, assignments, section information and structured course elements. This later extension was tested exploratorily and was not part of the main 405-interaction evaluation.
+The evaluated prototype primarily used course and institutional PDF collections. The ingestion pipeline was later extended to selected Moodle-native content, including course and section summaries, labels, pages, books, assignments, quizzes, forums, URLs, folders, and resources. The Moodle-native extension was tested exploratorily and was not part of the main 405-interaction evaluation.
 
 The repository includes:
 
 - a Moodle block interface for course pages;
 - a dedicated course chat page;
 - a global chat page for institutional information;
+- configurable administration settings in Moodle;
 - a Python RAG API built with FastAPI and Uvicorn;
-- an ingestion pipeline for course documents and selected Moodle-native content;
+- a dedicated Docker image for the RAG backend;
+- an ingestion pipeline for PDFs and selected Moodle-native content;
 - persistent vector retrieval through ChromaDB;
-- local LLM inference through Ollama or another compatible endpoint;
+- local or remote LLM inference through Ollama or a compatible endpoint;
+- PostgreSQL and MariaDB/MySQL database adapters;
 - source presentation for retrieved evidence;
-- optional debug and result logging for development and evaluation;
+- optional debug and evaluation-result logging;
 - the question set and supporting materials used in the project evaluation.
 
-> **Important:** the Moodle block does not operate as a standalone component. The Python RAG API must be running, an LLM endpoint must be reachable, and Moodle content must be ingested before the assistant can answer questions.
+> **Important:** the Moodle block is not a standalone component. The RAG API must be running, an LLM endpoint must be reachable, and authorised Moodle content must be ingested before the assistant can answer questions.
 
-> **Project status:** this repository contains a functional research prototype. Institutional use requires additional portability, security, reliability and independent validation work.
-
----
+> **Project status:** this repository contains a functional research prototype. Institutional use requires independent security, privacy, reliability, scalability, accessibility, and compatibility validation.
 
 ## Table of contents
 
-- [Repository structure](#repository-structure)
 - [Architecture](#architecture)
+- [Repository structure](#repository-structure)
 - [Requirements](#requirements)
 - [Installing the Moodle plugin](#installing-the-moodle-plugin)
-- [Moodle plugin configuration](#moodle-plugin-configuration)
+- [Moodle plugin settings](#moodle-plugin-settings)
 - [Environment configuration](#environment-configuration)
-- [Pulling the LLM model](#pulling-the-llm-model)
-- [Creating the ChromaDB directory](#creating-the-chromadb-directory)
-- [Ingesting Moodle course content](#ingesting-moodle-course-content)
-- [Starting the RAG API manually](#starting-the-rag-api-manually)
-- [Running the RAG API as a system service](#running-the-rag-api-as-a-system-service)
+- [Recommended Docker deployment](#recommended-docker-deployment)
+- [Manual Python deployment](#manual-python-deployment)
+- [Ingesting Moodle content](#ingesting-moodle-content)
 - [Testing the RAG API](#testing-the-rag-api)
 - [Using the assistant in Moodle](#using-the-assistant-in-moodle)
 - [Re-indexing strategy](#re-indexing-strategy)
+- [Database compatibility](#database-compatibility)
 - [Evaluation materials](#evaluation-materials)
 - [Known limitations](#known-limitations)
 - [Troubleshooting](#troubleshooting)
 - [Development notes](#development-notes)
 - [Security notes](#security-notes)
-- [Files to include in the plugin ZIP](#files-to-include-in-the-plugin-zip)
-- [Files to exclude from the plugin ZIP](#files-to-exclude-from-the-plugin-zip)
-- [Creating the plugin ZIP](#creating-the-plugin-zip)
-- [Validation commands before delivery](#validation-commands-before-delivery)
+- [Creating a plugin ZIP](#creating-a-plugin-zip)
+- [Validation before delivery](#validation-before-delivery)
 - [Institutional deployment considerations](#institutional-deployment-considerations)
 - [Academic context](#academic-context)
 
----
+## Architecture
+
+### Recommended containerised deployment
+
+```text
+Moodle webserver
+        |
+        | HTTP: http://rag-api:8001/ask
+        v
+RAG API service
+        |-- Moodle database: PostgreSQL or MariaDB/MySQL
+        |-- ChromaDB: persistent shared storage
+        `-- LLM endpoint: Ollama or a compatible service
+```
+
+A typical local Docker arrangement is:
+
+```text
+Moodle/PHP container
+PostgreSQL or MariaDB container
+RAG API container
+Ollama on the Docker host or another reachable machine
+Persistent Moodledata shared where required
+```
+
+The Moodle browser interface sends requests to `rag_endpoint.php`. The PHP endpoint validates the Moodle session and course access, forwards the request to the configured Python RAG API, and returns the answer and sources to the browser.
+
+The Python service retrieves course-aware evidence from ChromaDB, reranks and compresses the retrieved context, sends the bounded context to the configured LLM endpoint, and returns a structured response.
+
+### Manual or same-host deployment
+
+The RAG API can also run directly on a host using a Python virtual environment. In that arrangement, a common Moodle setting is:
+
+```text
+http://127.0.0.1:8001/ask
+```
+
+Use this address only when Moodle can reach the RAG API through the same network namespace or host. Containerised deployments normally use a Docker service name such as:
+
+```text
+http://rag-api:8001/ask
+```
+
+### Distributed institutional deployment
+
+```text
+Moodle server
+    `-- Moodle block and PHP endpoint
+
+RAG server
+    |-- FastAPI/Uvicorn
+    |-- ChromaDB
+    `-- authorised database and Moodledata access
+
+LLM server
+    `-- Ollama or another compatible generation endpoint
+```
+
+Routing, firewall rules, DNS, authentication, HTTPS or equivalent protected transport, service binding, access control, secrets management, and data-retention requirements must be validated before institutional use.
 
 ## Repository structure
 
-The repository root corresponds to the Moodle block directory that should be installed under:
+The repository root corresponds to the Moodle block directory installed as:
 
 ```text
 moodle/blocks/llmassistant/
 ```
 
-The main directories are:
+Main structure:
 
 ```text
-moodle-llm-assistant/
-├── amd/          # JavaScript source and compiled Moodle AMD modules
-├── classes/      # PHP classes and local plugin logic
-├── db/           # Moodle permissions, database schema and upgrade definitions
-├── evaluation/   # Evaluation question set and supporting project materials
-├── lang/         # Moodle language strings
-├── rag/          # FastAPI backend, ingestion pipeline, prompts and environment template
-├── templates/    # Mustache templates for the chat interface
+llmassistant/
+├── amd/                    # Moodle AMD JavaScript source and build output
+├── classes/                # PHP classes and plugin logic
+├── db/                     # Capabilities, schema, and upgrade definitions
+├── evaluation/             # Research evaluation materials
+├── lang/                   # Moodle language strings
+├── rag/                    # RAG API, ingestion, prompts, and Docker image
+│   ├── .dockerignore
+│   ├── .env.example
+│   ├── Dockerfile
+│   ├── config.py
+│   ├── docker-entrypoint.sh
+│   ├── moodle_db.py
+│   ├── rag_api.py
+│   ├── rag_ingest_moodle.py
+│   ├── requirements.txt
+│   └── prompts/
+├── templates/              # Mustache templates
 ├── README.md
 ├── block_llmassistant.php
 ├── settings.php
@@ -79,238 +145,293 @@ moodle-llm-assistant/
 └── ...
 ```
 
-The `evaluation/` directory contains research materials associated with the project and is not required for the runtime operation of the Moodle block. The `rag/` directory contains the external Python service required for retrieval, ingestion and answer generation.
-
----
-
-## Architecture
-
-The system has three main components:
-
-```text
-Moodle block → RAG API → ChromaDB + LLM endpoint
-```
-
-### Typical same-server deployment
-
-```text
-Moodle server
-├── Moodle block: /var/www/html/blocks/llmassistant
-├── RAG API: http://127.0.0.1:8001/ask
-├── ChromaDB: /var/www/moodledata/chroma_db
-└── LLM endpoint: Ollama or another compatible service
-```
-
-### Typical distributed institutional deployment
-
-```text
-Moodle server
-├── Moodle block
-└── Calls the RAG API through a protected internal endpoint
-
-RAG server
-├── FastAPI RAG backend
-├── ChromaDB
-└── Access to the Moodle database and required Moodle content
-
-LLM server
-└── Ollama or another compatible LLM endpoint
-```
-
-The Moodle block sends user questions to the internal PHP endpoint `rag_endpoint.php`. The PHP endpoint calls the Python RAG API. The RAG API retrieves relevant course content from ChromaDB, sends the retrieved context to an LLM and returns the final answer and supporting sources to Moodle.
-
-In a distributed deployment, the Moodle block, RAG API and LLM service must use network-accessible endpoints. Routing, firewall rules, service binding, authentication and HTTPS or equivalent institutional transport security must be validated before use.
-
----
+The `evaluation/` directory is retained for research transparency and is not required at runtime.
 
 ## Requirements
 
-### Moodle server
+### Moodle
 
-- A working Moodle installation.
-- Access to the Moodle web root.
+- A supported Moodle installation.
+- Administrator permission to install block plugins.
 - Access to the Moodle database.
-- Access to `moodledata`.
-- Permission to install Moodle plugins.
-- Python 3.10 or later recommended.
-- `pip` and Python virtual-environment support.
-- A running LLM endpoint, such as Ollama.
+- Access to the relevant Moodledata file storage for ingestion.
+- Network connectivity from Moodle to the RAG API.
 
-### Python packages
+### RAG backend
 
-The required packages are declared in:
+Recommended:
+
+- Docker Engine or Docker Desktop with Compose support.
+- Persistent storage for ChromaDB.
+- Access to the Moodle database.
+- Read access to authorised Moodledata content.
+- Access to Ollama or another compatible generation endpoint.
+
+Manual alternative:
+
+- Python 3.10 or later; Python 3.11 is used by the supplied Docker image.
+- `venv` and `pip`.
+- Packages listed in `rag/requirements.txt`.
+
+### LLM endpoint
+
+The default example uses Ollama with:
 
 ```text
-rag/requirements.txt
+qwen2.5:3b
 ```
 
-Install them in an isolated environment:
-
-```bash
-cd /var/www/html/blocks/llmassistant/rag
-python3 -m venv .venv
-source .venv/bin/activate
-python3 -m pip install --upgrade pip
-python3 -m pip install -r requirements.txt
-```
-
-> **Database compatibility:** the current backend was developed and tested using a direct PostgreSQL connection through `psycopg2`. Deployments using MariaDB/MySQL require adaptation of the database access layer or the introduction of a database abstraction mechanism. Changing only the database port is not sufficient.
-
----
+A stronger model may improve answer quality if adequate CPU, RAM, or GPU resources are available.
 
 ## Installing the Moodle plugin
 
-Copy the repository contents to:
+Copy the plugin directory to:
 
 ```text
-/var/www/html/blocks/llmassistant
+/path/to/moodle/blocks/llmassistant
 ```
 
-The final paths should include:
+The resulting paths should include:
 
 ```text
-/var/www/html/blocks/llmassistant/version.php
-/var/www/html/blocks/llmassistant/block_llmassistant.php
-/var/www/html/blocks/llmassistant/rag/rag_api.py
-/var/www/html/blocks/llmassistant/rag/rag_ingest_moodle.py
+/path/to/moodle/blocks/llmassistant/version.php
+/path/to/moodle/blocks/llmassistant/block_llmassistant.php
+/path/to/moodle/blocks/llmassistant/rag/rag_api.py
+/path/to/moodle/blocks/llmassistant/rag/Dockerfile
 ```
 
 Then, as a Moodle administrator:
 
-1. Go to **Site administration**.
+1. Open **Site administration**.
 2. Open **Notifications**, or access `/admin/index.php`.
-3. Follow the Moodle plugin installation or upgrade process.
-4. Purge caches if required under **Site administration → Development → Purge caches**.
+3. Complete the plugin installation or upgrade.
+4. Purge Moodle caches if required.
 
----
+## Moodle plugin settings
 
-## Moodle plugin configuration
-
-After installing the plugin, configure the RAG API URL under:
+Open:
 
 ```text
-Site administration → Plugins → Blocks → LLM Assistant → RAG API URL
+Site administration
+-> Plugins
+-> Blocks
+-> LLM Assistant
 ```
 
-Recommended same-server value:
+Available settings include:
+
+- **RAG API URL**;
+- **Connection timeout**;
+- **Request timeout**;
+- **Global source course ID**;
+- **Global source course name patterns**;
+- **Recent history messages**;
+- **Enable evaluation result logging**.
+
+Typical Docker value:
+
+```text
+http://rag-api:8001/ask
+```
+
+Typical same-host manual value:
 
 ```text
 http://127.0.0.1:8001/ask
 ```
 
-Illustrative distributed-deployment value:
+Illustrative distributed value:
 
 ```text
-http://rag-server.internal:8001/ask
+https://rag.internal.example/ask
 ```
 
-Replace the illustrative hostname with an address that is resolvable and reachable from the Moodle server. Do not expose the RAG API publicly unless authentication, firewall restrictions and HTTPS are properly configured.
+Do not expose the RAG API publicly without appropriate authentication, network restrictions, and protected transport.
 
----
+Recommended normal-operation values:
+
+```text
+Connection timeout: 10
+Request timeout: 180
+Recent history messages: 6
+Enable evaluation result logging: No
+```
+
+Use an explicit Moodle course ID for the global institutional source when possible. Name patterns provide a fallback but are less robust than a stable ID.
 
 ## Environment configuration
 
-A complete environment template is available at:
+The public template is:
 
 ```text
 rag/.env.example
 ```
 
-Copy the template to a secure location outside the Moodle web root:
+Create a real environment file outside the public repository and outside the Moodle web root. For example:
 
 ```bash
-sudo mkdir -p /etc/llmassistant
-sudo cp /var/www/html/blocks/llmassistant/rag/.env.example \
-  /etc/llmassistant/rag.env
-sudo chmod 640 /etc/llmassistant/rag.env
+mkdir -p /opt/llmassistant/config
+cp rag/.env.example /opt/llmassistant/config/rag.env
+chmod 640 /opt/llmassistant/config/rag.env
 ```
 
-Edit the copied file and adapt the values to the target environment:
-
-```bash
-sudo nano /etc/llmassistant/rag.env
-```
-
-At minimum, review the following variables:
+Review at least:
 
 ```env
-MOODLEDATA_PATH
-CHROMA_DB_PATH
-MOODLE_DB_HOST
-MOODLE_DB_PORT
-MOODLE_DB_NAME
-MOODLE_DB_USER
-MOODLE_DB_PASSWORD
-MOODLE_DB_PREFIX
-OLLAMA_BASE_URL
-OLLAMA_LLM_MODEL
-LLMASSISTANT_PROMPTS_DIR
-LLMASSISTANT_GLOBAL_SOURCE_PATTERNS
+MOODLE_DB_TYPE=pgsql
+MOODLE_DB_HOST=db
+MOODLE_DB_PORT=5432
+MOODLE_DB_NAME=moodle
+MOODLE_DB_USER=moodle
+MOODLE_DB_PASSWORD=CHANGE_ME
+MOODLE_DB_PREFIX=mdl_
+
+MOODLEDATA_PATH=/var/www/moodledata/filedir
+CHROMA_DB_PATH=/var/www/moodledata/chroma_db
+
+OLLAMA_BASE_URL=http://host.docker.internal:11434
+OLLAMA_LLM_MODEL=qwen2.5:3b
+LLMASSISTANT_PROMPTS_DIR=/app/prompts
+LLMASSISTANT_DEBUG=0
 ```
+
+Replace `CHANGE_ME` in the real environment file. Never commit real credentials.
 
 `MOODLE_DB_PREFIX` must match `$CFG->prefix` in Moodle's `config.php`.
 
-PostgreSQL commonly uses port `5432`, whereas MariaDB/MySQL commonly uses port `3306`. The current backend was developed and tested with PostgreSQL-specific database access and may require adaptation for other database management systems.
+Do not permanently define:
 
-Use `127.0.0.1` for `OLLAMA_BASE_URL` only when Ollama and the RAG backend run on the same machine. Distributed deployments require a network-accessible endpoint and appropriate firewall, binding, authentication and transport-security configuration.
-
-> Never commit the completed `rag.env` file or any environment file containing real credentials.
-
----
-
-## Pulling the LLM model
-
-If using Ollama, pull the selected model:
-
-```bash
-ollama pull qwen2.5:3b
+```env
+RESET_COLLECTION=true
 ```
 
-Stronger alternatives may improve performance if suitable RAM or GPU resources are available:
+Set ingestion controls only on intentional one-off ingestion commands.
 
-```bash
-ollama pull qwen2.5:7b
-ollama pull llama3.1:8b
+## Recommended Docker deployment
+
+The repository supplies a Docker image for the Python service in `rag/Dockerfile`.
+
+A Compose service can be defined as follows:
+
+```yaml
+services:
+  rag-api:
+    build:
+      context: /path/to/moodle/blocks/llmassistant/rag
+    restart: unless-stopped
+    env_file:
+      - /secure/path/rag.env
+    volumes:
+      - /persistent/moodledata:/var/www/moodledata
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
 ```
 
-Check whether Ollama is reachable:
+The exact volume and network configuration depends on the Moodle deployment. The RAG service must be able to:
+
+- reach the Moodle database;
+- read authorised files from Moodledata;
+- read and write the persistent ChromaDB directory;
+- reach the configured LLM endpoint.
+
+Build the service:
 
 ```bash
-curl http://127.0.0.1:11434/api/tags
+docker compose build rag-api
 ```
 
----
-
-## Creating the ChromaDB directory
-
-Create the persistent ChromaDB directory:
+Start it:
 
 ```bash
-sudo mkdir -p /var/www/moodledata/chroma_db
-sudo chown -R www-data:www-data /var/www/moodledata/chroma_db
-sudo chmod -R 775 /var/www/moodledata/chroma_db
+docker compose up -d rag-api
 ```
 
-The directory must be writable by the operating-system user running both the ingestion script and the RAG API.
+Check status:
 
----
+```bash
+docker compose ps
+```
 
-## Ingesting Moodle course content
+View logs:
 
-Before using the assistant, authorised Moodle course content must be indexed.
+```bash
+docker compose logs --tail 100 rag-api
+```
 
-Load the environment file and run ingestion:
+The image includes a health check against:
+
+```text
+http://127.0.0.1:8001/health
+```
+
+### Docker entrypoint modes
+
+The default mode starts the API:
+
+```text
+api
+```
+
+The ingestion mode runs the ingestion pipeline:
+
+```text
+ingest
+```
+
+Examples:
+
+```bash
+docker compose run --rm rag-api ingest
+```
+
+```bash
+docker compose run --rm \
+  -e TARGET_COURSE_ID=5 \
+  -e RESET_COLLECTION=false \
+  rag-api ingest
+```
+
+## Manual Python deployment
+
+For environments that do not use the supplied Docker image:
+
+```bash
+cd /path/to/moodle/blocks/llmassistant/rag
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install --upgrade pip
+python -m pip install -r requirements.txt
+```
+
+Load the protected environment file:
 
 ```bash
 set -a
-source /etc/llmassistant/rag.env
+source /secure/path/rag.env
 set +a
-
-cd /var/www/html/blocks/llmassistant/rag
-.venv/bin/python rag_ingest_moodle.py
 ```
 
-The pipeline creates one ChromaDB collection per Moodle course:
+Start the API:
+
+```bash
+python -m uvicorn rag_api:app \
+  --host 127.0.0.1 \
+  --port 8001
+```
+
+For a protected network deployment that must accept remote connections:
+
+```bash
+python -m uvicorn rag_api:app \
+  --host 0.0.0.0 \
+  --port 8001
+```
+
+Binding to `0.0.0.0` should be combined with appropriate network restrictions, authentication, and protected transport.
+
+## Ingesting Moodle content
+
+The ingestion pipeline creates one ChromaDB collection per Moodle course:
 
 ```text
 course_docs_<courseid>
@@ -322,155 +443,45 @@ Example:
 course_docs_5
 ```
 
-### Ingest a single course
+### Docker ingestion
+
+Ingest one course without deleting the existing collection:
+
+```bash
+docker compose run --rm \
+  -e TARGET_COURSE_ID=5 \
+  -e RESET_COLLECTION=false \
+  rag-api ingest
+```
+
+Intentionally rebuild one course collection:
+
+```bash
+docker compose run --rm \
+  -e TARGET_COURSE_ID=5 \
+  -e RESET_COLLECTION=true \
+  rag-api ingest
+```
+
+All-course mode is available by omitting `TARGET_COURSE_ID`, but should be used carefully in larger deployments.
+
+### Manual ingestion
 
 ```bash
 set -a
-source /etc/llmassistant/rag.env
+source /secure/path/rag.env
 set +a
 
-cd /var/www/html/blocks/llmassistant/rag
-TARGET_COURSE_ID=5 .venv/bin/python rag_ingest_moodle.py
+cd /path/to/moodle/blocks/llmassistant/rag
+TARGET_COURSE_ID=5 RESET_COLLECTION=false \
+  .venv/bin/python rag_ingest_moodle.py
 ```
 
-### Rebuild a single course collection
-
-```bash
-set -a
-source /etc/llmassistant/rag.env
-set +a
-
-cd /var/www/html/blocks/llmassistant/rag
-TARGET_COURSE_ID=5 RESET_COLLECTION=true .venv/bin/python rag_ingest_moodle.py
-```
-
-### Rebuild all collections
-
-```bash
-set -a
-source /etc/llmassistant/rag.env
-set +a
-
-cd /var/www/html/blocks/llmassistant/rag
-RESET_COLLECTION=true .venv/bin/python rag_ingest_moodle.py
-```
-
-Use `RESET_COLLECTION=true` only when a complete rebuild is intentionally required. Re-run ingestion when relevant course materials or Moodle-native elements are added, removed or changed.
-
----
-
-## Starting the RAG API manually
-
-For same-server testing without debug mode:
-
-```bash
-set -a
-source /etc/llmassistant/rag.env
-set +a
-
-cd /var/www/html/blocks/llmassistant/rag
-.venv/bin/python -m uvicorn rag_api:app --host 127.0.0.1 --port 8001
-```
-
-If the Moodle server must access the API from another machine:
-
-```bash
-.venv/bin/python -m uvicorn rag_api:app --host 0.0.0.0 --port 8001
-```
-
-Only bind to `0.0.0.0` when network access is restricted appropriately and the required authentication and transport-security controls are in place.
-
-### Starting with debug and result logging enabled
-
-For development, testing or evaluation:
-
-```bash
-set -a
-source /etc/llmassistant/rag.env
-set +a
-
-cd /var/www/html/blocks/llmassistant/rag
-LLMASSISTANT_DEBUG=1 .venv/bin/python -m uvicorn rag_api:app --host 127.0.0.1 --port 8001
-```
-
-When debug mode is enabled, the backend returns additional diagnostic information. `rag_endpoint.php` can then store one evaluation snapshot per question together with an appended CSV summary row.
-
-Generated result files are stored under:
-
-```text
-/var/www/moodledata/llmassistant_results
-```
-
-Each interaction can create:
-
-- one JSON snapshot containing the question, request payload, backend response, final response, sources, timings and debug fields;
-- one appended row in `/var/www/moodledata/llmassistant_results/all_results_summary.csv`.
-
-Use debug mode only when detailed diagnostics or evaluation data are required. For normal operation, keep:
-
-```env
-LLMASSISTANT_DEBUG=0
-```
-
-If permission errors occur:
-
-```bash
-sudo mkdir -p /var/www/moodledata/llmassistant_results
-sudo chown -R www-data:www-data /var/www/moodledata/llmassistant_results
-sudo chmod -R 775 /var/www/moodledata/llmassistant_results
-```
-
----
-
-## Running the RAG API as a system service
-
-Create:
-
-```text
-/etc/systemd/system/moodle-llmassistant-rag.service
-```
-
-Example same-server service:
-
-```ini
-[Unit]
-Description=Moodle LLM Assistant RAG API
-After=network.target
-
-[Service]
-User=www-data
-WorkingDirectory=/var/www/html/blocks/llmassistant/rag
-EnvironmentFile=/etc/llmassistant/rag.env
-ExecStart=/var/www/html/blocks/llmassistant/rag/.venv/bin/python -m uvicorn rag_api:app --host 127.0.0.1 --port 8001
-Restart=always
-RestartSec=5
-
-[Install]
-WantedBy=multi-user.target
-```
-
-Enable and start the service:
-
-```bash
-sudo systemctl daemon-reload
-sudo systemctl enable moodle-llmassistant-rag
-sudo systemctl start moodle-llmassistant-rag
-sudo systemctl status moodle-llmassistant-rag
-```
-
-View logs:
-
-```bash
-journalctl -u moodle-llmassistant-rag -f
-```
-
-Set `LLMASSISTANT_DEBUG=1` in the protected environment file only when debug output is intentionally required.
-
----
+Re-run ingestion when relevant Moodle content is added, removed, or changed.
 
 ## Testing the RAG API
 
-Test the health endpoint:
+Health check:
 
 ```bash
 curl http://127.0.0.1:8001/health
@@ -492,37 +503,42 @@ Test a question:
 ```bash
 curl -X POST http://127.0.0.1:8001/ask \
   -H "Content-Type: application/json" \
-  -d '{"question":"Who are the teachers of this course?","courseid":5,"userid":1}'
+  -d '{
+    "question": "What is a database?",
+    "courseid": 5,
+    "userid": 1,
+    "history": []
+  }'
 ```
 
-Illustrative response:
+A successful response can include:
 
 ```json
 {
   "answer": "...",
-  "sources": []
+  "sources": ["Document.pdf (p. 10)"],
+  "sources_structured": []
 }
 ```
 
-If no information is returned, check that:
+If no answer is found, verify:
 
-1. the Moodle course exists;
-2. the course has been ingested;
-3. the corresponding ChromaDB collection exists;
-4. the RAG API can access the LLM endpoint;
-5. the Moodle database credentials are correct;
-6. `MOODLE_DB_PREFIX` matches `$CFG->prefix` in Moodle's `config.php`.
-
----
+- the Moodle course exists;
+- the correct course ID is being used;
+- the course was ingested;
+- `course_docs_<courseid>` exists and contains records;
+- Moodledata files are readable;
+- the RAG API can reach the LLM endpoint;
+- database credentials and prefix are correct.
 
 ## Using the assistant in Moodle
 
-### Course chat
+### Course block
 
-Add the **LLM Assistant** block to a Moodle course page. The assistant uses the current course identifier and retrieves information from:
+Add the **LLM Assistant** block to a Moodle course. The assistant queries:
 
 ```text
-course_docs_<courseid>
+course_docs_<current_course_id>
 ```
 
 ### Dedicated course chat page
@@ -541,43 +557,65 @@ Example:
 /blocks/llmassistant/global.php
 ```
 
-The global chat uses `courseid=0` and resolves the institutional source course by matching its fullname or shortname against `LLMASSISTANT_GLOBAL_SOURCE_PATTERNS`.
-
----
+The global chat resolves an institutional source course using the configured source course ID, with name patterns as a fallback.
 
 ## Re-indexing strategy
 
 Re-run ingestion when:
 
-- new PDFs are uploaded;
-- Moodle labels, pages or books are changed;
-- assignments, quizzes, URLs, folders or resources are updated;
-- dates or deadlines are changed;
+- PDFs are uploaded, removed, or replaced;
+- labels, pages, or books change;
+- assignments, quizzes, URLs, folders, forums, or resources change;
+- section summaries or dates change;
 - a course is imported or restored;
-- the ingestion or RAG logic changes significantly.
+- chunking, extraction, or retrieval logic changes significantly.
 
-Recommended manual rebuild for one course:
-
-```bash
-set -a
-source /etc/llmassistant/rag.env
-set +a
-
-cd /var/www/html/blocks/llmassistant/rag
-TARGET_COURSE_ID=5 RESET_COLLECTION=true .venv/bin/python rag_ingest_moodle.py
-```
-
-For production use, re-indexing should be coordinated with institutional maintenance and content-update processes. Full collection rebuilding may temporarily affect availability and should be scheduled carefully.
-
-Illustrative scheduled ingestion command:
+Prefer rebuilding one explicit course:
 
 ```bash
-0 3 * * 0 cd /var/www/html/blocks/llmassistant/rag && set -a && . /etc/llmassistant/rag.env && set +a && .venv/bin/python rag_ingest_moodle.py >> /var/log/llmassistant_ingest.log 2>&1
+docker compose run --rm \
+  -e TARGET_COURSE_ID=5 \
+  -e RESET_COLLECTION=true \
+  rag-api ingest
 ```
 
-Use `RESET_COLLECTION=true` in a scheduled command only when a complete rebuild is deliberately required.
+Schedule large rebuilds carefully because they can consume CPU, storage, and database resources.
 
----
+## Database compatibility
+
+The database access layer is implemented in:
+
+```text
+rag/moodle_db.py
+```
+
+Supported configuration values:
+
+```env
+MOODLE_DB_TYPE=pgsql
+```
+
+and:
+
+```env
+MOODLE_DB_TYPE=mariadb
+```
+
+Drivers:
+
+- PostgreSQL: `psycopg2-binary`;
+- MariaDB/MySQL: `PyMySQL`.
+
+The current local end-to-end deployment was validated with PostgreSQL. The MariaDB/MySQL adapter is implemented, but a target institutional environment should still be independently validated for SQL compatibility, character encoding, permissions, performance, and operational behaviour.
+
+Typical ports:
+
+```text
+PostgreSQL: 5432
+MariaDB/MySQL: 3306
+```
+
+Changing only the port is not sufficient; `MOODLE_DB_TYPE` must match the target database.
 
 ## Evaluation materials
 
@@ -589,96 +627,80 @@ evaluation/
 └── evaluation_questions.pdf
 ```
 
-The main evaluation comprised 405 logged interactions across two course-scoped PDF corpora and one global regulatory corpus. The question set includes factual, conceptual, procedural and regulation-specific questions in English and Portuguese.
+The main evaluation comprised 405 logged interactions across two course-scoped PDF corpora and one global regulatory corpus. The Moodle-native content extension was tested later and should not be interpreted as part of the 405-interaction dataset.
 
-The later Moodle-native content tests were exploratory and were conducted after the main evaluation. They should not be interpreted as part of the 405-interaction dataset.
-
-The evaluation materials are included for transparency and reproducibility. They are not required for the runtime operation of the Moodle block or RAG backend and should normally be excluded from deployment packages.
-
----
+Evaluation materials are not required for runtime deployment and may be excluded from deployment packages.
 
 ## Known limitations
 
-The prototype should be treated as a research artefact rather than a production-ready institutional service.
+This project is a research prototype rather than a production-ready institutional service.
 
 Answer quality depends on:
 
-- the quality and structure of the indexed Moodle content;
-- document extraction and chunking;
-- retrieval and reranking quality;
-- the evidence included in the final model context;
+- indexed content quality and structure;
+- PDF and HTML extraction;
+- chunking;
+- vector retrieval and reranking;
+- context compression;
+- prompt design;
 - the capability of the selected LLM.
 
-Small local models may perform adequately on bounded factual questions but can struggle with:
+Smaller local models can struggle with:
 
-- tables and class schedules;
+- tables and schedules;
 - row and column relationships;
 - abbreviations and legends;
-- conceptually similar documents;
-- exact regulatory scope;
-- bilingual or cross-language retrieval;
-- unsupported or ambiguous questions.
+- closely related documents;
+- precise regulatory scope;
+- bilingual retrieval;
+- ambiguous or unsupported questions.
 
-The main evaluation used PDF collections. Moodle-native activities, links, sections and structured course elements were added later and assessed only through exploratory testing.
+Moodle-native ingestion was added after the main PDF-based evaluation and received exploratory rather than full-scale evaluation.
 
-The current database integration was developed for PostgreSQL and is not directly portable to MariaDB/MySQL without adaptation. Institutional deployment also requires validation of Python and dependency compatibility, network connectivity, service endpoints, firewall rules, access control and target Moodle configuration.
-
----
+The Docker service improves reproducibility but does not by itself provide production authentication, auditing, high availability, monitoring, rate limiting, or protected public exposure.
 
 ## Troubleshooting
 
-### The Moodle chat keeps loading
-
-Check the API and service:
+### The RAG service is unhealthy
 
 ```bash
-curl http://127.0.0.1:8001/health
-systemctl status moodle-llmassistant-rag
-journalctl -u moodle-llmassistant-rag -n 100
+docker compose logs --tail 200 rag-api
 ```
 
-### The API cannot reach Ollama
+Check:
+
+- the real environment file exists;
+- `MOODLE_DB_PASSWORD` is correct;
+- the database hostname is resolvable;
+- `MOODLE_DB_PREFIX` matches Moodle;
+- ChromaDB storage is mounted and writable;
+- Moodledata is readable;
+- the LLM endpoint is reachable.
+
+### Moodle cannot reach the RAG API
+
+From the Moodle container or host, test:
 
 ```bash
-curl http://127.0.0.1:11434/api/tags
+curl http://rag-api:8001/health
 ```
 
-If Ollama runs on another server, validate the configured endpoint, routing, firewall rules, service binding and access controls.
+Confirm that the Moodle plugin setting uses a hostname reachable from Moodle.
 
-### No answer is found for a course
-
-Check that the course was ingested and rebuild it if necessary:
+### The RAG API cannot reach Ollama
 
 ```bash
-set -a
-source /etc/llmassistant/rag.env
-set +a
-
-cd /var/www/html/blocks/llmassistant/rag
-TARGET_COURSE_ID=<courseid> RESET_COLLECTION=true .venv/bin/python rag_ingest_moodle.py
+curl http://host.docker.internal:11434/api/tags
 ```
 
-### Debug files are not being created
-
-Confirm that `/health` reports debug mode as enabled, then check permissions:
-
-```bash
-ls -la /var/www/moodledata/llmassistant_results
-```
-
-If required:
-
-```bash
-sudo mkdir -p /var/www/moodledata/llmassistant_results
-sudo chown -R www-data:www-data /var/www/moodledata/llmassistant_results
-sudo chmod -R 775 /var/www/moodledata/llmassistant_results
-```
+For remote Ollama installations, verify routing, firewall rules, service binding, authentication, and transport security.
 
 ### Database connection errors
 
 Review:
 
-```env
+```text
+MOODLE_DB_TYPE
 MOODLE_DB_HOST
 MOODLE_DB_PORT
 MOODLE_DB_NAME
@@ -687,45 +709,85 @@ MOODLE_DB_PASSWORD
 MOODLE_DB_PREFIX
 ```
 
-The prefix must match `$CFG->prefix`. MariaDB/MySQL deployments require backend adaptation; changing the port alone is not sufficient.
+### No information is found
+
+Check the course ID and collection:
+
+```bash
+python - <<'PY'
+from chromadb import PersistentClient
+client = PersistentClient(path="/var/www/moodledata/chroma_db")
+for item in client.list_collections():
+    collection = client.get_collection(item.name)
+    print(item.name, collection.count())
+PY
+```
+
+Re-ingest the affected course if necessary.
 
 ### Permission errors
 
-Ensure that the service user can access the required Moodle data, ChromaDB, prompt and result paths. Apply ownership and permissions according to the institution's security policy rather than granting broader access than necessary.
+Ensure that the service user or container can:
 
----
+- read the required Moodledata files;
+- read and write ChromaDB;
+- read prompts and configuration;
+- write optional evaluation results when logging is enabled.
+
+Apply the least privileges required by the target environment.
 
 ## Development notes
 
-If JavaScript files in `amd/src` are changed, rebuild the AMD assets from a Moodle development environment:
+### Python validation
 
 ```bash
-npx grunt amd
+PYTHONDONTWRITEBYTECODE=1 python3 - <<'PY'
+from pathlib import Path
+for filename in [
+    "rag/config.py",
+    "rag/moodle_db.py",
+    "rag/rag_api.py",
+    "rag/rag_ingest_moodle.py",
+]:
+    path = Path(filename)
+    compile(path.read_text(encoding="utf-8"), str(path), "exec")
+    print("OK:", path)
+PY
 ```
 
-After changing PHP files, language strings or plugin settings, purge Moodle caches.
+### Docker entrypoint validation
 
-If `version.php` is updated, open `/admin/index.php` to trigger the Moodle upgrade process.
+```bash
+sh -n rag/docker-entrypoint.sh
+```
 
----
+### Moodle AMD JavaScript
+
+If files under `amd/src` change, rebuild the AMD assets from a Moodle development environment:
+
+```bash
+npx --no-install grunt amd --root=blocks/llmassistant
+```
+
+After changing PHP, language strings, settings, or JavaScript, purge Moodle caches.
+
+If `version.php` changes, open `/admin/index.php` to trigger the Moodle upgrade process.
 
 ## Security notes
 
-- Do not expose the RAG API publicly without authentication and transport security.
-- Prefer binding Uvicorn to `127.0.0.1` for same-server deployments.
-- Restrict distributed-service endpoints through appropriate firewall rules and access controls.
-- Store database credentials outside the Moodle web root, for example in `/etc/llmassistant/rag.env`.
-- Do not commit production secrets or a real `.env` file.
-- Debug mode can store user questions, assistant answers, retrieved sources, timing data and backend debug fields in `moodledata`.
-- Enable debug mode only for development, controlled testing or evaluation.
-- Validate Moodle access control so that users can query only content they are authorised to access.
-- Review data retention, minimisation and deletion procedures before institutional use.
+- Do not expose the RAG API publicly without authentication and protected transport.
+- Keep the real environment file outside Git and outside the public web root.
+- Do not commit production secrets.
+- Restrict database credentials to the permissions required for ingestion and lookup.
+- Validate Moodle access control so users can query only authorised content.
+- Treat debug and evaluation logs as potentially sensitive because they can contain questions, answers, sources, and timing information.
+- Disable evaluation logging during normal operation unless explicitly required.
+- Review data minimisation, retention, deletion, backup protection, and incident-response requirements before institutional deployment.
+- Container separation improves deployment hygiene but is not a complete security boundary by itself.
 
----
+## Creating a plugin ZIP
 
-## Files to include in the plugin ZIP
-
-A deployment ZIP should contain the Moodle block and required RAG service files:
+A deployment package should include:
 
 ```text
 llmassistant/
@@ -746,57 +808,53 @@ llmassistant/
 ├── lang/
 ├── templates/
 └── rag/
+    ├── .dockerignore
     ├── .env.example
+    ├── Dockerfile
+    ├── config.py
+    ├── docker-entrypoint.sh
+    ├── moodle_db.py
     ├── rag_api.py
     ├── rag_ingest_moodle.py
     ├── requirements.txt
     └── prompts/
 ```
 
-The `evaluation/` directory is retained in the source repository for research transparency but is not required for runtime operation and should normally be excluded from deployment packages.
-
----
-
-## Files to exclude from the plugin ZIP
-
-Do not include local or generated material such as:
+Exclude local and generated material:
 
 ```text
 .git/
 evaluation/
 rag/.env
 rag/.venv/
+rag/venv/
 rag/__pycache__/
+rag/*.pyc
 rag/vectordb/
 rag/chroma_db/
-rag/*.pyc
 moodledata/
-chroma_db/
 node_modules/
-vendor/
 llmassistant_results/
+*:Zone.Identifier
 ```
 
-Inspect the package before delivery rather than relying only on deletion commands.
-
----
-
-## Creating the plugin ZIP
-
-From the Moodle `blocks` directory:
+Create an archive from the Moodle `blocks` directory:
 
 ```bash
 cd /path/to/moodle/blocks
+
 zip -r llmassistant.zip llmassistant \
   -x "llmassistant/.git/*" \
   -x "llmassistant/evaluation/*" \
   -x "llmassistant/rag/.env" \
   -x "llmassistant/rag/.venv/*" \
+  -x "llmassistant/rag/venv/*" \
   -x "llmassistant/rag/__pycache__/*" \
   -x "llmassistant/rag/vectordb/*" \
   -x "llmassistant/rag/chroma_db/*" \
   -x "llmassistant/**/*.pyc" \
-  -x "llmassistant/llmassistant_results/*"
+  -x "llmassistant/llmassistant_results/*" \
+  -x "*:Zone.Identifier"
 ```
 
 Inspect the archive:
@@ -805,65 +863,68 @@ Inspect the archive:
 unzip -l llmassistant.zip
 ```
 
-Verify that it does not contain credentials, generated vector data, debug results or evaluation-only material.
-
----
-
-## Validation commands before delivery
+## Validation before delivery
 
 From the plugin directory:
 
 ```bash
-cd /var/www/html/blocks/llmassistant
-rag/.venv/bin/python -m py_compile rag/rag_api.py
-rag/.venv/bin/python -m py_compile rag/rag_ingest_moodle.py
+find . -type f -name '*:Zone.Identifier' -print
 ```
 
-Confirm that the environment template and prompts exist:
+The command should return no output.
 
-```bash
-ls -la rag
-find rag/prompts -maxdepth 1 -type f -print
-```
-
-Search for files that should not be distributed:
+Check for prohibited local files:
 
 ```bash
 find . -type f \
-  \( -name ".env" -o -name "*.log" -o -name "*.pyc" -o -name "*.sqlite" -o -name "*.db" \)
+  \( -name '.env' \
+     -o -name '*.log' \
+     -o -name '*.pyc' \
+     -o -name '*.sqlite' \
+     -o -name '*.db' \)
 ```
 
-Review the results manually before creating a release or changing the repository visibility to public.
+Validate the public environment template:
 
----
+```bash
+grep '^MOODLE_DB_PASSWORD=' rag/.env.example
+```
+
+Expected:
+
+```text
+MOODLE_DB_PASSWORD=CHANGE_ME
+```
+
+Review the package manually before delivery or making a repository public.
 
 ## Institutional deployment considerations
 
-A complete deployment requires:
+A complete institutional deployment requires:
 
-1. the Moodle block to be installed;
-2. compatible Python dependencies to be available;
-3. authorised Moodle content to be ingested into ChromaDB;
-4. the RAG API to run continuously;
-5. an LLM endpoint to be reachable;
-6. Moodle, backend and LLM endpoints to be configured correctly;
-7. database access and filesystem permissions to be validated;
-8. access control, authentication, firewall rules and transport security to be reviewed.
+- installation and upgrade testing on the target Moodle version;
+- database compatibility testing on the target DBMS;
+- Python image and dependency validation;
+- persistent and protected ChromaDB storage;
+- authorised access to Moodledata;
+- a continuously available RAG API;
+- a reachable and approved LLM endpoint;
+- network, DNS, firewall, authentication, and TLS validation;
+- logging, monitoring, alerting, backup, and restore procedures;
+- privacy, retention, deletion, and governance review;
+- performance and concurrency testing;
+- independent functional and security validation.
 
-The prototype was validated functionally in a local Moodle environment. An installation in the institutional Moodle environment was attempted but not completed because of a combination of factors, including PostgreSQL/MariaDB compatibility, environment configuration, separation of services across machines and Python-version compatibility.
-
-The incomplete institutional installation does not affect the reported local evaluation, but institutional end-to-end validation remains future work.
-
----
+The prototype was evaluated locally. Earlier institutional installation attempts were not completed because of environment differences, including database, service separation, configuration, and dependency compatibility. The new database adapter and Docker service improve portability, but they do not replace target-environment validation.
 
 ## Academic context
 
 This software artefact was developed as part of the Master's project:
 
-> *Leveraging the Power of LLMs in a Moodle Education Plugin: A Retrieval-Augmented Generation Approach for Course and Institutional Question Answering*
+_Leveraging the Power of LLMs in a Moodle Education Plugin: A Retrieval-Augmented Generation Approach for Course and Institutional Question Answering_
 
 NOVA Information Management School, Universidade Nova de Lisboa.
 
 **Author:** Salvador de Oliveira Carvalho Nunes Domingues
 
-The repository preserves the development history relevant to the `llmassistant` component. This project repository was extracted from a broader private development repository that also contained the local Moodle environment and supporting infrastructure.
+The public plugin repository is extracted from a broader private development repository that also contains the local Moodle environment and supporting infrastructure.
