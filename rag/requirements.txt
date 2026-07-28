@@ -1,8 +1,10 @@
 fastapi
-uvicorn
+uvicorn[standard]
 chromadb
 requests
 psycopg2-binary
+PyMySQL
 PyMuPDF
 beautifulsoup4
 pydantic
+python-dotenv

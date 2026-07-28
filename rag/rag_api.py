@@ -25,7 +25,8 @@ import hashlib
 import requests
 import unicodedata
 from functools import lru_cache
-import psycopg2
+from config import DatabaseSettings
+from moodle_db import connect as moodle_db_connect
 
 # -----------------------------
 # CONFIG
@@ -193,15 +194,8 @@ SCHEDULE_QUESTION_RE = re.compile(
 CLASS_NUM_RE = re.compile(r"\b(?:class|aula)\s+(\d+)\b", re.IGNORECASE)
 TRACK_RE = re.compile(r"\b(thesis|project|tese|projeto)\b", re.IGNORECASE)
 
-DB_PREFIX = os.getenv("MOODLE_DB_PREFIX", "mdl_")
-
-DB = {
-    "host": os.getenv("MOODLE_DB_HOST", "localhost"),
-    "port": int(os.getenv("MOODLE_DB_PORT", "5432")),
-    "dbname": os.getenv("MOODLE_DB_NAME", "moodle"),
-    "user": os.getenv("MOODLE_DB_USER", "moodle"),
-    "password": os.getenv("MOODLE_DB_PASSWORD", ""),
-}
+DB_SETTINGS = DatabaseSettings.from_environment(require_password=False)
+DB_PREFIX = DB_SETTINGS.prefix
 
 GLOBAL_SOURCE_PATTERNS = [
     s.strip()
@@ -218,9 +212,9 @@ GLOBAL_SOURCE_PATTERNS = [
 print("[CONFIG] CHROMA_DB_PATH =", CHROMA_DB_PATH)
 print("[CONFIG] OLLAMA_BASE_URL =", OLLAMA_BASE_URL)
 print("[CONFIG] OLLAMA_LLM_MODEL =", LLM_MODEL)
-print("[CONFIG] MOODLE_DB_HOST =", DB["host"])
-print("[CONFIG] MOODLE_DB_NAME =", DB["dbname"])
-print("[CONFIG] MOODLE_DB_USER =", DB["user"])
+print("[CONFIG] MOODLE_DB_HOST =", DB_SETTINGS.host)
+print("[CONFIG] MOODLE_DB_NAME =", DB_SETTINGS.name)
+print("[CONFIG] MOODLE_DB_USER =", DB_SETTINGS.user)
 print("[CONFIG] MOODLE_DB_PREFIX =", DB_PREFIX)
 print("[CONFIG] DEBUG =", DEBUG)
 
@@ -259,7 +253,8 @@ def load_text(path: str) -> str:
         return ""
     
 def db_connect():
-    return psycopg2.connect(**DB)
+    """Open a configured Moodle database connection."""
+    return moodle_db_connect(DatabaseSettings.from_environment())
 
 def normalize_compare(text: str) -> str:
     text = (text or "").strip().lower()

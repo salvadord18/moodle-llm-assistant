@@ -43,26 +43,19 @@ except ImportError as exc:
         "Install it with: pip3 install beautifulsoup4"
     ) from exc
 import fitz
-import psycopg2
+from config import (
+    CHROMA_DB_PATH, MOODLEDATA_PATH, RESET_COLLECTION, TARGET_COURSE_ID,
+    DatabaseSettings,
+)
+from moodle_db import connect as moodle_db_connect
 from chromadb import PersistentClient
 from chromadb.utils.embedding_functions import DefaultEmbeddingFunction
 
 # -----------------------------
 # CONFIG
 # -----------------------------
-MOODLEDATA_PATH = os.getenv("MOODLEDATA_PATH", "/var/www/moodledata/filedir")
-CHROMA_DB_PATH = os.getenv("CHROMA_DB_PATH", "/var/www/moodledata/chroma_db")
-TARGET_COURSE_ID = int(os.getenv("TARGET_COURSE_ID", "0"))
-RESET_COLLECTION = os.getenv("RESET_COLLECTION", "false").lower() == "true"
-DB_PREFIX = os.getenv("MOODLE_DB_PREFIX", "mdl_")
-
-DB = {
-    "host": os.getenv("MOODLE_DB_HOST", "localhost"),
-    "port": int(os.getenv("MOODLE_DB_PORT", "5432")),
-    "dbname": os.getenv("MOODLE_DB_NAME", "moodle"),
-    "user": os.getenv("MOODLE_DB_USER", "moodle"),
-    "password": os.getenv("MOODLE_DB_PASSWORD", ""),
-}
+DB_SETTINGS = DatabaseSettings.from_environment()
+DB_PREFIX = DB_SETTINGS.prefix
 
 COURSE_CONTEXTLEVEL = 50
 MODULE_CONTEXTLEVEL = 70
@@ -626,7 +619,8 @@ def page_title_hint(page_text: str) -> str:
 
 
 def db_connect():
-    return psycopg2.connect(**DB)
+    """Open a configured Moodle database connection."""
+    return moodle_db_connect(DB_SETTINGS)
 
 
 def get_all_course_ids_with_content() -> List[int]:
@@ -1656,9 +1650,9 @@ def ingest_course(chroma_client: PersistentClient, courseid: int) -> None:
 if __name__ == "__main__":
     print("[CONFIG] MOODLEDATA_PATH =", MOODLEDATA_PATH)
     print("[CONFIG] CHROMA_DB_PATH   =", CHROMA_DB_PATH)
-    print("[CONFIG] DB host          =", DB["host"])
-    print("[CONFIG] DB name          =", DB["dbname"])
-    print("[CONFIG] DB user          =", DB["user"])
+    print("[CONFIG] DB host          =", DB_SETTINGS.host)
+    print("[CONFIG] DB name          =", DB_SETTINGS.name)
+    print("[CONFIG] DB user          =", DB_SETTINGS.user)
     print("[CONFIG] DB prefix        =", DB_PREFIX)
     print("[CONFIG] TARGET_COURSE_ID =", TARGET_COURSE_ID)
     print("[CONFIG] RESET_COLLECTION =", RESET_COLLECTION)
