@@ -17,6 +17,11 @@ final class config {
         return $value !== '' ? $value : 'http://127.0.0.1:8001/ask';
     }
 
+    /** @return string Shared token for authenticating Moodle to the RAG API. */
+    public static function api_token(): string {
+        return trim((string) get_config('block_llmassistant', 'api_token'));
+    }
+
     /** @return int Connection timeout in seconds. */
     public static function connect_timeout(): int {
         return self::bounded_int('connect_timeout', 10, 1, 60);

@@ -16,6 +16,13 @@ if ($ADMIN->fulltree) {
         PARAM_URL
     ));
 
+    $settings->add(new admin_setting_configpasswordunmask(
+        'block_llmassistant/api_token',
+        get_string('api_token', 'block_llmassistant'),
+        get_string('api_token_desc', 'block_llmassistant'),
+        ''
+    ));
+
     $settings->add(new admin_setting_configtext(
         'block_llmassistant/connect_timeout',
         get_string('connect_timeout', 'block_llmassistant'),

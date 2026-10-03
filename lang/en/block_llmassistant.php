@@ -27,6 +27,8 @@ $string['welcome_global'] = 'Hi! Ask me about academic regulations, deadlines an
 // RAG API configuration.
 $string['rag_api_url'] = 'RAG API URL';
 $string['rag_api_url_desc'] = 'URL of the Python RAG API endpoint used by the LLM Assistant. Example: http://127.0.0.1:8001/ask';
+$string['api_token'] = 'RAG API token';
+$string['api_token_desc'] = 'Shared Bearer token configured as LLMASSISTANT_API_TOKEN on the RAG API server. Keep this value secret.';
 
 // Optional labels for chat pages.
 $string['coursechat'] = 'Course chat';

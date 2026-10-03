@@ -18,6 +18,8 @@ http://rag-api.example.org:8001/ask
 
 This URL is called by the Moodle server. It must not point to a Docker-only hostname unless Moodle itself runs in that Docker network. Configure the connection and request timeouts according to the expected model latency.
 
+Set **RAG API token** to the same secret configured as `LLMASSISTANT_API_TOKEN` on the API server. Keep the token private and restrict the API firewall to the Moodle server.
+
 ## API dependency
 
 The separate API application is documented in the [RAG API repository](https://github.com/salvadord18/moodle-llm-assistant-api). The Moodle server must be able to reach its `/health` and `/ask` endpoints. Course content must be indexed by an administrator on the API server before the assistant can answer course questions.

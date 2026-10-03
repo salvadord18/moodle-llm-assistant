@@ -630,7 +630,12 @@ try {
 
     $ch = curl_init($apiurl);
     curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
-    curl_setopt($ch, CURLOPT_HTTPHEADER, ['Content-Type: application/json']);
+    $headers = ['Content-Type: application/json'];
+    $apitoken = config::api_token();
+    if ($apitoken !== '') {
+        $headers[] = 'Authorization: Bearer ' . $apitoken;
+    }
+    curl_setopt($ch, CURLOPT_HTTPHEADER, $headers);
     curl_setopt($ch, CURLOPT_POST, true);
     curl_setopt($ch, CURLOPT_POSTFIELDS, $payload);
     curl_setopt($ch, CURLOPT_CONNECTTIMEOUT, config::connect_timeout());
