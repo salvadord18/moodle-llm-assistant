@@ -22,6 +22,6 @@ Set **RAG API token** to the same secret configured as `LLMASSISTANT_API_TOKEN` 
 
 ## API dependency
 
-The separate API application is documented in the [RAG API repository](https://github.com/salvadord18/moodle-llm-assistant-api). The Moodle server must be able to reach its `/health` and `/ask` endpoints. Course content must be indexed by an administrator on the API server before the assistant can answer course questions.
+The separate API application is documented in the [RAG API repository](https://github.com/salvadord18/moodle-llm-assistant-api). The Moodle server must be able to reach its `/ready` and `/ask` endpoints. Course content must be indexed by an administrator on the API server before the assistant can answer course questions.
 
 When creating a Moodle plugin ZIP, include the contents of this directory and exclude local development files. Do not include the separate `rag-api` directory in the plugin ZIP.
